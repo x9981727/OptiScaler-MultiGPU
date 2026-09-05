@@ -1,6 +1,8 @@
 name: Build OptiScaler 0.9.4 MultiGPU FSRFG (Unsigned)
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -44,7 +46,7 @@ jobs:
       - name: Build Release
         shell: powershell
         run: |
-          msbuild upstream /m /p:Configuration=Release /verbosity:minimal
+          msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package unsigned final layout
