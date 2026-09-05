@@ -26,10 +26,27 @@ jobs:
       - name: Reconstruct v2 dual-context hotfix
         shell: powershell
         run: |
-          $parts = Get-ChildItem "$env:GITHUB_WORKSPACE\hotfix-v2.b64.part*" | Sort-Object Name
-          if ($parts.Count -eq 0) { throw "No v2 hotfix parts found" }
-          $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
-          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\MultiGPU-v2-dual-context-hotfix.patch", [Convert]::FromBase64String($b64))
+          $names = @(
+            "hotfix-exact.b64.part00",
+            "hotfix-exact.b64.part01",
+            "hotfix-exact.b64.part02",
+            "hotfix-exact.b64.part03",
+            "hotfix-exact.b64.part04",
+            "hotfix-exact.b64.part05",
+            "hotfix-exact.b64.part06"
+          )
+          $b64 = ($names | ForEach-Object {
+            $path = Join-Path $env:GITHUB_WORKSPACE $_
+            if (-not (Test-Path $path)) { throw "Missing v2 hotfix part: $_" }
+            (Get-Content $path -Raw).Trim()
+          }) -join ''
+          $bytes = [Convert]::FromBase64String($b64)
+          $hotfixPath = "$env:GITHUB_WORKSPACE\MultiGPU-v2-dual-context-hotfix.patch"
+          [IO.File]::WriteAllBytes($hotfixPath, $bytes)
+          $sha = (Get-FileHash $hotfixPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne "e35187ee474aa07b4a7183ea41e86a96491b99841bc7b09d3983fdea96f9219a") {
+            throw "v2 hotfix SHA256 mismatch: $sha"
+          }
 
       - name: Clone OptiScaler v0.9.4 with submodules
         shell: powershell
