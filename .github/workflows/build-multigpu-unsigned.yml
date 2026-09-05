@@ -88,9 +88,9 @@ jobs:
         shell: powershell
         run: |
           $hotfix = Join-Path $env:GITHUB_WORKSPACE "MultiGPU-v2-dual-context-hotfix.patch"
-          git -C upstream apply --check $hotfix
+          git -C upstream apply --check --exclude=OptiScaler/framegen/MultiGPU_Dx12.cpp $hotfix
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git -C upstream apply $hotfix
+          git -C upstream apply --exclude=OptiScaler/framegen/MultiGPU_Dx12.cpp $hotfix
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Add MSBuild to PATH
