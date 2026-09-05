@@ -68,19 +68,20 @@ jobs:
           msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Package unsigned final layout
+      - name: Package unsigned ZIP
         shell: powershell
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned.7z"
-          7z a -r $archive "$outDir\*.*"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned.zip"
+          if (Test-Path $archive) { Remove-Item $archive -Force }
+          Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
+          if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
 
-      - name: Upload 7z
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned.7z
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned.zip
           compression-level: 0
           if-no-files-found: error
