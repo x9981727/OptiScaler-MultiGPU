@@ -50,8 +50,14 @@ jobs:
             [IO.File]::WriteAllBytes($destination, [Convert]::FromBase64String($b64))
             Write-Host "Restored $destination ($((Get-Item $destination).Length) bytes)"
           }
-          Restore-Base64Parts "$env:GITHUB_WORKSPACE\src\MultiGPU_Dx12.h.b64.part*" "$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\MultiGPU_Dx12.h"
-          Restore-Base64Parts "$env:GITHUB_WORKSPACE\src\MultiGPU_Dx12.cpp.b64.part*" "$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\MultiGPU_Dx12.cpp"
+          $header = "$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\MultiGPU_Dx12.h"
+          $source = "$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\MultiGPU_Dx12.cpp"
+          Restore-Base64Parts "$env:GITHUB_WORKSPACE\src\MultiGPU_Dx12.h.b64.part*" $header
+          Restore-Base64Parts "$env:GITHUB_WORKSPACE\src\MultiGPU_Dx12.cpp.b64.part*" $source
+          $text = [IO.File]::ReadAllText($source)
+          $text = $text.Replace("CreateCommandAlocator", "CreateCommandAllocator")
+          [IO.File]::WriteAllText($source, $text, [Text.UTF8Encoding]::new($false))
+          if ([IO.File]::ReadAllText($source).Contains("CreateCommandAlocator")) { throw "MultiGPU source typo fixup failed" }
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
