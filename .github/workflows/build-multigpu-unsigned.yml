@@ -92,6 +92,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C upstream apply --exclude=OptiScaler/framegen/MultiGPU_Dx12.cpp $hotfix
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $fsrfg = Join-Path $env:GITHUB_WORKSPACE "upstream\OptiScaler\framegen\ffx\FSRFG_Dx12.cpp"
+          $text = [IO.File]::ReadAllText($fsrfg)
+          $text = $text.Replace("auto computeResult = FFX_API_RETURN_OK;", "ffxReturnCode_t computeResult = FFX_API_RETURN_OK;")
+          [IO.File]::WriteAllText($fsrfg, $text, [Text.UTF8Encoding]::new($false))
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
