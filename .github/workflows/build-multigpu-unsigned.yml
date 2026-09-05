@@ -1,0 +1,65 @@
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG (Unsigned)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout build kit
+        uses: actions/checkout@v4
+
+      - name: Reconstruct MultiGPU patch
+        shell: powershell
+        run: |
+          $parts = Get-ChildItem "$env:GITHUB_WORKSPACE\patch.b64.part*" | Sort-Object Name
+          if ($parts.Count -eq 0) { throw "No patch parts found" }
+          $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\OptiScaler-0.9.4-MultiGPU-FSRFG-WIP.patch", [Convert]::FromBase64String($b64))
+
+      - name: Clone OptiScaler v0.9.4 with submodules
+        shell: powershell
+        run: |
+          git clone --branch v0.9.4 --depth 1 --recurse-submodules https://github.com/optiscaler/OptiScaler.git upstream
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C upstream submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Apply MultiGPU patch
+        shell: powershell
+        run: |
+          $patch = Join-Path $env:GITHUB_WORKSPACE "OptiScaler-0.9.4-MultiGPU-FSRFG-WIP.patch"
+          git -C upstream apply --check $patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C upstream apply $patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release
+        shell: powershell
+        run: |
+          msbuild upstream /m /p:Configuration=Release /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package unsigned final layout
+        shell: powershell
+        run: |
+          $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
+          if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned.7z"
+          7z a -r $archive "$outDir\*.*"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload 7z
+        uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-unsigned.7z
+          compression-level: 0
+          if-no-files-found: error
