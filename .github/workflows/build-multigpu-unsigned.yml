@@ -40,6 +40,19 @@ jobs:
           git -C upstream apply $patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Restore MultiGPU source files
+        shell: powershell
+        run: |
+          function Restore-Base64Parts([string]$pattern, [string]$destination) {
+            $parts = Get-ChildItem $pattern | Sort-Object Name
+            if ($parts.Count -eq 0) { throw "No source parts found: $pattern" }
+            $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+            [IO.File]::WriteAllBytes($destination, [Convert]::FromBase64String($b64))
+            Write-Host "Restored $destination ($((Get-Item $destination).Length) bytes)"
+          }
+          Restore-Base64Parts "$env:GITHUB_WORKSPACE\src\MultiGPU_Dx12.h.b64.part*" "$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\MultiGPU_Dx12.h"
+          Restore-Base64Parts "$env:GITHUB_WORKSPACE\src\MultiGPU_Dx12.cpp.b64.part*" "$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\MultiGPU_Dx12.cpp"
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
