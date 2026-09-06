@@ -1,4 +1,4 @@
-name: Build OptiScaler 0.9.4 MultiGPU FSRFG v5 (Unsigned)
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v6 (Unsigned)
 
 on:
   push:
@@ -109,6 +109,12 @@ jobs:
           & "$env:GITHUB_WORKSPACE\scripts\apply-v5.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Apply v6 XeFG virtual-swapchain offload
+        shell: powershell
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\apply-v6-xefg.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
@@ -118,7 +124,7 @@ jobs:
           msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify v5 markers are in compiled DLL
+      - name: Verify v5 and v6 markers are in compiled DLL
         shell: powershell
         run: |
           $dll = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a\OptiScaler.dll"
@@ -128,7 +134,11 @@ jobs:
             'MultiGPU v5: blocking IAmdExtFfxApi while Fsr4Update is temporarily disabled',
             'MultiGPU v5: temporarily disabling Fsr4Update for secondary FG context',
             'MultiGPU v5: restored Fsr4Update to {}',
-            'MultiGPU: scoped internal D3D12 adapter override'
+            'MultiGPU: scoped internal D3D12 adapter override',
+            'MultiGPU v6: XeFG context created on secondary GPU',
+            'MultiGPU v6: virtual backbuffer initialization',
+            'MultiGPU v6: XeFG proxy swapchain virtualized for the render adapter',
+            'MultiGPU v6: virtual backbuffer {} copied to secondary proxy swapchain'
           )
           foreach ($marker in $markers) {
             if (-not $ascii.Contains($marker)) { throw "Compiled DLL is missing required marker: $marker" }
@@ -141,14 +151,14 @@ jobs:
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-v5-unsigned.zip"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v6-unsigned.zip"
           Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
           if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-v5-unsigned-zip
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-v5-unsigned.zip
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v6-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v6-unsigned.zip
           compression-level: 0
           if-no-files-found: error
