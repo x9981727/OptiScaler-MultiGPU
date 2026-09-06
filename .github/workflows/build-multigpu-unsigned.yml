@@ -2,7 +2,7 @@ name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v11 (Unsigned)
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/v11-dual-gpu-resize]
   workflow_dispatch:
 
 permissions:
