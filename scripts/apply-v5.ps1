@@ -1,9 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-# Keep the v3 adapter override, but do NOT use the broken v4 cross-TU bypass.
-& "$env:GITHUB_WORKSPACE\scripts\apply-v3.ps1"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
+# v3 is applied by the workflow in a separate PowerShell process before this script.
 $fsr4Cpp = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\fsr4\FSR4Upgrade.cpp'
 $fsrfg = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\framegen\ffx\FSRFG_Dx12.cpp'
 
