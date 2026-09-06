@@ -37,11 +37,18 @@ jobs:
           git -C upstream cherry-pick --no-commit 7a1f18ca121c16ecbd9c15cd3b14ab29273d31a7
           $pickCode = $LASTEXITCODE
           $conflicts = @(git -C upstream diff --name-only --diff-filter=U)
+          $keep094 = @(
+            'OptiScaler/SysUtils.h',
+            'OptiScaler/State.h',
+            'OptiScaler/OptiScaler.vcxproj',
+            'OptiScaler/OptiScaler.vcxproj.filters',
+            'OptiScaler/framegen/IFGFeature.cpp'
+          )
           if ($conflicts.Count -gt 0) {
             Write-Host "Resolving DLSSG baseline conflicts:"
             foreach ($file in $conflicts) {
               Write-Host "  $file"
-              if ($file -eq 'OptiScaler/SysUtils.h' -or $file -eq 'OptiScaler/State.h') {
+              if ($keep094 -contains $file) {
                 git -C upstream checkout --ours -- $file
               } else {
                 git -C upstream checkout --theirs -- $file
@@ -54,29 +61,68 @@ jobs:
           $left = @(git -C upstream diff --name-only --diff-filter=U)
           if ($left.Count -gt 0) { throw "Unresolved DLSSG conflicts remain: $($left -join ', ')" }
 
-          # Keep v0.9.4 State.h and inject only fields/functions required by the official DLSSG output.
+          # v0.9.4 State.h + only the fields/functions required by official DLSSG output.
           $statePath = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\State.h'
           $s = [IO.File]::ReadAllText($statePath)
-          $s = $s.Replace(
-            "    std::optional<std::wstring> NVNGX_DLSSG_Path;`r`n",
-            "    std::optional<std::wstring> NVNGX_DLSSG_Path;`r`n`r`n    // DLSSG / Streamline modules`r`n    HMODULE optiSlInterposer = nullptr;`r`n    HMODULE optiSlCommon = nullptr;`r`n    HMODULE optiSlDLSSG = nullptr;`r`n    HMODULE optiSlReflex = nullptr;`r`n    HMODULE optiSlPCL = nullptr;`r`n    HMODULE optiDLSSG = nullptr;`r`n")
-          $s = $s.Replace(
-            "    feature_version streamlineVersion = { 0, 0, 0 };`r`n",
-            "    feature_version streamlineVersion = { 0, 0, 0 };`r`n    std::optional<int> dlssgMfgMax = std::nullopt;`r`n")
-          $s = $s.Replace(
-            "    int xefgMaxInterpolationCount = 1;`r`n",
-            "    int xefgMaxInterpolationCount = 1;`r`n    int dlssgMaxInterpolationCount = 1;`r`n")
-          $s = $s.Replace(
-            "    // Moved checks here to prevent circular includes`r`n",
-            "    static UINT GetOwner()`r`n    {`r`n        _lastOwner++;`r`n        return _lastOwner;`r`n    }`r`n`r`n    // Moved checks here to prevent circular includes`r`n")
-          $s = $s.Replace(
-            "    inline static UINT _skipOwner = 0;`r`n",
-            "    inline static UINT _skipOwner = 0;`r`n    inline static UINT _lastOwner = 0;`r`n")
+          $s = [regex]::Replace($s,
+            '(?m)^(\s*std::optional<std::wstring> NVNGX_DLSSG_Path;\r?\n)',
+            '$1' + "`r`n    // DLSSG / Streamline modules`r`n    HMODULE optiSlInterposer = nullptr;`r`n    HMODULE optiSlCommon = nullptr;`r`n    HMODULE optiSlDLSSG = nullptr;`r`n    HMODULE optiSlReflex = nullptr;`r`n    HMODULE optiSlPCL = nullptr;`r`n    HMODULE optiDLSSG = nullptr;`r`n",
+            1)
+          $s = [regex]::Replace($s,
+            '(?m)^(\s*feature_version streamlineVersion = \{ 0, 0, 0 \};\r?\n)',
+            '$1' + '    std::optional<int> dlssgMfgMax = std::nullopt;' + "`r`n",
+            1)
+          $s = [regex]::Replace($s,
+            '(?m)^(\s*int xefgMaxInterpolationCount = 1;\r?\n)',
+            '$1' + '    int dlssgMaxInterpolationCount = 1;' + "`r`n",
+            1)
+          $s = [regex]::Replace($s,
+            '(?m)^(\s*// Moved checks here to prevent circular includes\r?\n)',
+            "    static UINT GetOwner()`r`n    {`r`n        _lastOwner++;`r`n        return _lastOwner;`r`n    }`r`n`r`n" + '$1',
+            1)
+          $s = [regex]::Replace($s,
+            '(?m)^(\s*inline static UINT _skipOwner = 0;\r?\n)',
+            '$1' + '    inline static UINT _lastOwner = 0;' + "`r`n",
+            1)
           [IO.File]::WriteAllText($statePath, $s, [Text.UTF8Encoding]::new($false))
 
           foreach ($marker in @('HMODULE optiSlInterposer', 'dlssgMaxInterpolationCount', 'static UINT GetOwner()', '_lastOwner = 0')) {
             if (-not $s.Contains($marker)) { throw "DLSSG State injection failed: $marker" }
           }
+
+          # v0.9.4 project file + only DLSSG output sources.
+          $projPath = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\OptiScaler.vcxproj'
+          $p = [IO.File]::ReadAllText($projPath)
+          if (-not $p.Contains('framegen\dlssg\DLSSG_Dx12.h')) {
+            $p = $p.Replace(
+              '    <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />',
+              '    <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h" />' + "`r`n" + '    <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />')
+          }
+          if (-not $p.Contains('proxies\Streamline_Proxy.h')) {
+            $p = $p.Replace(
+              '    <ClInclude Include="proxies\Dxgi_Proxy.h" />',
+              '    <ClInclude Include="proxies\Dxgi_Proxy.h" />' + "`r`n" + '    <ClInclude Include="proxies\Streamline_Proxy.h" />')
+          }
+          if (-not $p.Contains('framegen\dlssg\DLSSG_Dx12.cpp')) {
+            $p = $p.Replace(
+              '    <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />',
+              '    <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp" />' + "`r`n" + '    <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />')
+          }
+          [IO.File]::WriteAllText($projPath, $p, [Text.UTF8Encoding]::new($false))
+          foreach ($marker in @('framegen\dlssg\DLSSG_Dx12.h', 'framegen\dlssg\DLSSG_Dx12.cpp', 'proxies\Streamline_Proxy.h')) {
+            if (-not $p.Contains($marker)) { throw "DLSSG project injection failed: $marker" }
+          }
+
+          # Preserve 0.9.4 frame-count behaviour except DLSSG output, which supplies an authoritative frame id.
+          $ifgPath = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\framegen\IFGFeature.cpp'
+          $ifg = [IO.File]::ReadAllText($ifgPath)
+          $needle = "void IFGFeature::SetFrameCount(UINT64 frameId)`r`n{`r`n"
+          if (-not $ifg.Contains('activeFgOutput == FGOutput::DLSSG')) {
+            $replacement = $needle + "    if (State::Instance().activeFgOutput == FGOutput::DLSSG)`r`n    {`r`n        _frameCount = frameId;`r`n        return;`r`n    }`r`n`r`n"
+            $ifg = $ifg.Replace($needle, $replacement)
+          }
+          [IO.File]::WriteAllText($ifgPath, $ifg, [Text.UTF8Encoding]::new($false))
+          if (-not $ifg.Contains('activeFgOutput == FGOutput::DLSSG')) { throw 'DLSSG IFGFeature injection failed' }
 
           Write-Host "Cherry-pick initial exit code: $pickCode"
           Write-Host "=== BACKPORT STAT ==="
