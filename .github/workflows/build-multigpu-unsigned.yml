@@ -123,9 +123,9 @@ jobs:
           if ($sha -ne "690e732e4076ed0e119d9fd43dd41623100b0a226f27a9169267f697a47b5e79") {
             throw "v7 patch SHA256 mismatch: $sha"
           }
-          git -C upstream\OptiScaler apply --check $patch
+          git -C upstream apply --check --directory=OptiScaler $patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git -C upstream\OptiScaler apply $patch
+          git -C upstream apply --directory=OptiScaler $patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $xefg = [IO.File]::ReadAllText("$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\xefg\XeFG_Dx12.cpp")
           $dxgi = [IO.File]::ReadAllText("$env:GITHUB_WORKSPACE\upstream\OptiScaler\hooks\DxgiFactory_Hooks.cpp")
