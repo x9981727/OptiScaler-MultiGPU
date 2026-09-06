@@ -120,7 +120,7 @@ jobs:
         run: |
           $patch = Join-Path $env:GITHUB_WORKSPACE "v7\xefg-init-isolation.patch"
           $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($sha -ne "b3828e3665d2e5d30f7a82ed77e573b0cd61b1de0e1cf57f2aa79d1b15e21c7a") {
+          if ($sha -ne "690e732e4076ed0e119d9fd43dd41623100b0a226f27a9169267f697a47b5e79") {
             throw "v7 patch SHA256 mismatch: $sha"
           }
           git -C upstream\OptiScaler apply --check $patch
