@@ -97,6 +97,12 @@ jobs:
           $text = $text.Replace("auto computeResult = FFX_API_RETURN_OK;", "ffxReturnCode_t computeResult = FFX_API_RETURN_OK;")
           [IO.File]::WriteAllText($fsrfg, $text, [Text.UTF8Encoding]::new($false))
 
+      - name: Apply v3 scoped AMD internal adapter override
+        shell: powershell
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\apply-v3.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Apply v5 scoped secondary FSR4 isolation
         shell: powershell
         run: |
@@ -121,6 +127,7 @@ jobs:
           $markers = @(
             'MultiGPU v5: blocking IAmdExtFfxApi while Fsr4Update is temporarily disabled',
             'MultiGPU v5: temporarily disabling Fsr4Update for secondary FG context',
+            'MultiGPU v5: restored Fsr4Update to {}',
             'MultiGPU: scoped internal D3D12 adapter override'
           )
           foreach ($marker in $markers) {
