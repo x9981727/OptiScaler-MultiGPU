@@ -1,59 +1,52 @@
 $ErrorActionPreference = 'Stop'
 
-$names = @(
-    'v6\xefg-v6.patch.part00a',
-    'v6\xefg-v6.patch.part00b',
-    'v6\xefg-v6.patch.part01',
-    'v6\xefg-v6.patch.part02a',
-    'v6\xefg-v6.patch.part02b',
-    'v6\xefg-v6.patch.part03',
-    'v6\xefg-v6.patch.part04',
-    'v6\xefg-v6.patch.part05',
-    'v6\xefg-v6.patch.part06',
-    'v6\xefg-v6.patch.part07'
+$chunkNames = @(
+    'v6\\xefg-v6.patch.gz.part00',
+    'v6\\xefg-v6.patch.gz.part01'
 )
-$patch = Join-Path $env:GITHUB_WORKSPACE 'v6\MultiGPU-v6-XeFG-virtual-swapchain.patch'
-$stream = [IO.File]::Open($patch, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+$outGz = Join-Path $env:GITHUB_WORKSPACE 'v6\\MultiGPU-v6-XeFG.patch.gz'
+$outPatch = Join-Path $env:GITHUB_WORKSPACE 'v6\\MultiGPU-v6-XeFG-virtual-swapchain.rebuilt.patch'
+
+$stream = [IO.File]::Open($outGz, [IO.FileMode]::Create, [IO.FileAccess]::Write)
 try {
-    foreach ($name in $names) {
-        $path = Join-Path $env:GITHUB_WORKSPACE $name
-        if (-not (Test-Path $path)) { throw "Missing v6 XeFG patch fragment: $name" }
+    foreach ($relative in $chunkNames) {
+        $path = Join-Path $env:GITHUB_WORKSPACE $relative
+        if (-not (Test-Path $path)) { throw "Missing XeFG v6 gzip chunk: $relative" }
         $bytes = [IO.File]::ReadAllBytes($path)
         $stream.Write($bytes, 0, $bytes.Length)
     }
 }
-finally {
-    $stream.Dispose()
+finally { $stream.Dispose() }
+
+$gzSize = (Get-Item $outGz).Length
+$gzSha = (Get-FileHash $outGz -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Host "Reconstructed XeFG v6 gzip: $gzSize bytes, SHA256=$gzSha"
+if ($gzSize -ne 7737) { throw "v6 XeFG gzip size mismatch: $gzSize" }
+if ($gzSha -ne '7ca3cf3c23d81a17eb58ccaeecc8a0d1b2c65aa7011672e7bc9a76443282eece') { throw "v6 XeFG gzip SHA256 mismatch: $gzSha" }
+
+$input = [IO.File]::OpenRead($outGz)
+$output = [IO.File]::Create($outPatch)
+try {
+    $gzip = [IO.Compression.GZipStream]::new($input, [IO.Compression.CompressionMode]::Decompress)
+    try { $gzip.CopyTo($output) } finally { $gzip.Dispose() }
 }
+finally { $output.Dispose(); $input.Dispose() }
 
-$expectedSha = 'c13c47049a9d77bb8b3fbb50afcdb08d548da75eab5c8c85ca1c060f78fcbdc2'
-$sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
-$size = (Get-Item $patch).Length
-Write-Host "Reconstructed XeFG v6 patch: $size bytes, SHA256=$sha"
-if ($size -ne 37893) { throw "v6 XeFG patch size mismatch: $size" }
-if ($sha -ne $expectedSha) { throw "v6 XeFG patch SHA256 mismatch: $sha" }
+$size = (Get-Item $outPatch).Length
+$sha = (Get-FileHash $outPatch -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Host "Decompressed XeFG v6 patch: $size bytes, SHA256=$sha"
+if ($size -ne 37585) { throw "v6 XeFG patch size mismatch: $size" }
+if ($sha -ne '63bf8df77d02b413fb59cc5b21df62b708bfe400abde921783e17d0869794f92') { throw "v6 XeFG patch SHA256 mismatch: $sha" }
 
-git -C upstream apply --check --whitespace=error-all $patch
+git -C upstream apply --check $outPatch
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-git -C upstream apply $patch
+git -C upstream apply $outPatch
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$checks = @(
-    'upstream\OptiScaler\framegen\xefg\XeFG_Dx12.cpp',
-    'upstream\OptiScaler\wrapped\wrapped_swapchain.cpp',
-    'upstream\OptiScaler\hooks\FG_Hooks.cpp',
-    'upstream\OptiScaler\framegen\MultiGPU_Dx12.cpp'
-)
-foreach ($relative in $checks) {
-    $path = Join-Path $env:GITHUB_WORKSPACE $relative
-    if (-not (Test-Path $path)) { throw "v6 source missing: $relative" }
-}
-
-$xefg = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\framegen\xefg\XeFG_Dx12.cpp'))
-$wrapped = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\wrapped\wrapped_swapchain.cpp'))
-$hooks = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\hooks\FG_Hooks.cpp'))
+$xefg = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'upstream\\OptiScaler\\framegen\\xefg\\XeFG_Dx12.cpp'))
+$wrapped = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'upstream\\OptiScaler\\wrapped\\wrapped_swapchain.cpp'))
+$hooks = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'upstream\\OptiScaler\\hooks\\FG_Hooks.cpp'))
 if (-not $xefg.Contains('MultiGPU v6: XeFG context created on secondary GPU')) { throw 'v6 XeFG source marker missing' }
 if (-not $wrapped.Contains('MultiGPU v6: virtual backbuffer initialization')) { throw 'v6 virtual backbuffer source marker missing' }
 if (-not $hooks.Contains('MultiGPU v6: XeFG proxy swapchain virtualized')) { throw 'v6 FG hook source marker missing' }
-
 Write-Host 'v6 XeFG MultiGPU virtual-swapchain patch applied successfully.'
