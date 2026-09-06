@@ -1,0 +1,59 @@
+name: Diagnose DLSSG Backport
+
+on:
+  push:
+    branches: [dlssg-backport]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout build kit
+        uses: actions/checkout@v4
+
+      - name: Clone OptiScaler v0.9.4
+        shell: powershell
+        run: |
+          git clone --branch v0.9.4 --depth 1 https://github.com/optiscaler/OptiScaler.git upstream
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Fetch official DLSSG output commit
+        shell: powershell
+        run: |
+          git -C upstream fetch origin 7a1f18ca121c16ecbd9c15cd3b14ab29273d31a7 --depth=2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C upstream show --no-patch --format="DLSSG commit %H %P %s" 7a1f18ca121c16ecbd9c15cd3b14ab29273d31a7
+
+      - name: Probe cherry-pick compatibility
+        shell: powershell
+        run: |
+          git -C upstream config user.name "OptiScaler MultiGPU CI"
+          git -C upstream config user.email "ci@localhost"
+          git -C upstream cherry-pick --no-commit 7a1f18ca121c16ecbd9c15cd3b14ab29273d31a7
+          $code = $LASTEXITCODE
+          Write-Host "cherry-pick exit code: $code"
+          Write-Host "=== STATUS ==="
+          git -C upstream status --short
+          Write-Host "=== UNMERGED FILES ==="
+          $conflicts = @(git -C upstream diff --name-only --diff-filter=U)
+          if ($conflicts.Count -gt 0) {
+            $conflicts | ForEach-Object { Write-Host $_ }
+            Write-Host "=== CONFLICT MARKER COUNTS ==="
+            foreach ($file in $conflicts) {
+              $path = Join-Path "$env:GITHUB_WORKSPACE\upstream" $file
+              $count = 0
+              if (Test-Path $path) {
+                $count = ([regex]::Matches([IO.File]::ReadAllText($path), '<<<<<<<')).Count
+              }
+              Write-Host "$file : $count conflict block(s)"
+            }
+            exit 1
+          }
+          if ($code -ne 0) { exit $code }
+          Write-Host "=== BACKPORT DIFF STAT ==="
+          git -C upstream diff --stat
+          Write-Host "Official DLSSG output commit applies cleanly to v0.9.4."
