@@ -38,9 +38,9 @@ Write-Host "Decompressed XeFG v6 patch: $size bytes, SHA256=$sha"
 if ($size -ne 37585) { throw "v6 XeFG patch size mismatch: $size" }
 if ($sha -ne '63bf8df77d02b413fb59cc5b21df62b708bfe400abde921783e17d0869794f92') { throw "v6 XeFG patch SHA256 mismatch: $sha" }
 
-git -C upstream apply --check $outPatch
+git -C upstream/OptiScaler apply --check $outPatch
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-git -C upstream apply $outPatch
+git -C upstream/OptiScaler apply $outPatch
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $xefg = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'upstream\\OptiScaler\\framegen\\xefg\\XeFG_Dx12.cpp'))
