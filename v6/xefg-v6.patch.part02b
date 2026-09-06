@@ -1,0 +1,47 @@
+t resourceParam = GetResourceData(type, fIndex);
+ 
+-        int indexDiff = GetIndex() - fIndex;
+-        if (indexDiff < 0)
+-            indexDiff += BUFFER_COUNT;
++                    // SDK version 2.1.1 fixes those issues
++                    if (version < feature_version { 1, 2, 2 })
++                    {
++                        // HACK: XeFG docs lie and cmd list is technically required as it checks for it
++                        // But it doesn't seem to use it when the validity is UNTIL_NEXT_PRESENT
++                        // https://github.com/intel/xess/issues/45
++                        if (fResource->cmdList == nullptr && resourceParam.validity == XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT)
++                            fResource->cmdList = (ID3D12GraphicsCommandList*) 1;
++
++                        // HACK: XeFG seems to crash if the resource is in COPY_SOURCE state
++                        // even though the docs say it's the preferred state
++                        // https://github.com/intel/xess/issues/47
++                        if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
++                        {
++                            ResourceBarrier(inputResource->cmdList, inputResource->resource, inputResource->state,
++                                            D3D12_RESOURCE_STATE_COPY_DEST);
++
++                            resourceParam.incomingState = D3D12_RESOURCE_STATE_COPY_DEST;
++                        }
++                    }
+ 
+-        // We will us UI color later with Render UI
+-        if (type != FG_ResourceType::UIColor ||
+-            (XeFGProxy::SetUiCompositionState() != nullptr || Config::Instance()->FGDrawUIOverFG.value_or_default()))
+-        {
+-            auto frameId = static_cast<uint32_t>(_frameCount - indexDiff);
+-            auto result =
+-                XeFGProxy::D3D12TagFrameResource()(_swapChainContext, fResource->cmdList, frameId, &resourceParam);
+-            LOG_DEBUG("D3D12TagFrameResource, frameId: {}, type: {} result: {} ({})", frameId,
+-                      magic_enum::enum_name(type), magic_enum::enum_name(result), (int32_t) result);
++                    int indexDiff = GetIndex() - fIndex;
++                    if (indexDiff < 0)
++                        indexDiff += BUFFER_COUNT;
+ 
+-            if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+-            {
+-                State::Instance().FGchanged = true;
+-                UpdateTarget();
+-                Deactivate();
++                    // We will us UI color later with Render UI
++                    if (type != FG_ResourceType::UIColor ||
++                   

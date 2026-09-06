@@ -1,0 +1,45 @@
+RCE_STATE_COMMON);
++    Transition(fgCmdList, fgTarget, D3D12_RESOURCE_STATE_COPY_DEST, targetState);
++    _fgSharedState = D3D12_RESOURCE_STATE_COMMON;
++    return true;
++}
++
+ bool CrossAdapterTextureBridge::RecordFGTransition(ID3D12GraphicsCommandList* fgCmdList,
+                                                     D3D12_RESOURCE_STATES finalState)
+ {
+diff --git a/OptiScaler/framegen/MultiGPU_Dx12.h b/OptiScaler/framegen/MultiGPU_Dx12.h
+index b5beaf9..e1465b6 100644
+--- a/OptiScaler/framegen/MultiGPU_Dx12.h
++++ b/OptiScaler/framegen/MultiGPU_Dx12.h
+@@ -232,6 +232,11 @@ class CrossAdapterTextureBridge
+     // Records shared buffer -> local FG texture on a command list owned by the FG device.
+     bool RecordFGCopy(ID3D12GraphicsCommandList* fgCmdList, D3D12_RESOURCE_STATES finalState);
+ 
++    // Imports the shared buffer directly into an arbitrary texture owned by the FG adapter.
++    // Used by the virtual-backbuffer path to feed the real XeFG/DLSSG proxy swapchain.
++    bool RecordFGImport(ID3D12GraphicsCommandList* fgCmdList, ID3D12Resource* fgTarget,
++                        D3D12_RESOURCE_STATES targetState);
++
+     // Changes the FG-local texture state without copying. Used for output surfaces that are
+     // written by the FG algorithm rather than imported from the render adapter.
+     bool RecordFGTransition(ID3D12GraphicsCommandList* fgCmdList, D3D12_RESOURCE_STATES finalState);
+diff --git a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
+index edf83ba..1e6ffb6 100644
+--- a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
++++ b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
+@@ -188,8 +188,19 @@ xefg_swapchain_d3d12_resource_data_t XeFG_Dx12::GetResourceData(FG_ResourceType
+ 
+     resourceParam.resourceBase = { fResource->left, fResource->top };
+     resourceParam.resourceSize = { static_cast<uint32_t>(fResource->width), fResource->height };
+-    resourceParam.pResource = fResource->GetResource();
++    resourceParam.pResource = IsMultiGPUActive() ? GetMultiGPUResource(type, index) : fResource->GetResource();
+     resourceParam.incomingState = fResource->state;
++    if (IsMultiGPUActive() &&
++        (resourceParam.incomingState == D3D12_RESOURCE_STATE_COPY_DEST ||
++         resourceParam.incomingState == D3D12_RESOURCE_STATE_COPY_SOURCE ||
++         resourceParam.incomingState == D3D12_RESOURCE_STATE_COMMON))
++        resourceParam.incomingState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++
++    if (IsMultiGPUActive() && resourceParam.pResource == nullptr)
++    {
++        LOG_ERROR("MultiGPU v6: secondary XeFG resource missing for {} frame {}", magi

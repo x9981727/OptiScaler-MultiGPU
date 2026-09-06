@@ -1,6 +1,17 @@
 $ErrorActionPreference = 'Stop'
 
-$names = 0..7 | ForEach-Object { "v6\xefg-v6.patch.part{0:D2}" -f $_ }
+$names = @(
+    'v6\xefg-v6.patch.part00a',
+    'v6\xefg-v6.patch.part00b',
+    'v6\xefg-v6.patch.part01',
+    'v6\xefg-v6.patch.part02a',
+    'v6\xefg-v6.patch.part02b',
+    'v6\xefg-v6.patch.part03',
+    'v6\xefg-v6.patch.part04',
+    'v6\xefg-v6.patch.part05',
+    'v6\xefg-v6.patch.part06',
+    'v6\xefg-v6.patch.part07'
+)
 $patch = Join-Path $env:GITHUB_WORKSPACE 'v6\MultiGPU-v6-XeFG-virtual-swapchain.patch'
 $stream = [IO.File]::Open($patch, [IO.FileMode]::Create, [IO.FileAccess]::Write)
 try {
