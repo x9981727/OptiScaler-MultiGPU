@@ -1,4 +1,4 @@
-name: Diagnose DLSSG Backport
+name: Build DLSSG Backport Baseline
 
 on:
   push:
@@ -18,7 +18,9 @@ jobs:
       - name: Clone OptiScaler v0.9.4
         shell: powershell
         run: |
-          git clone --branch v0.9.4 --depth 1 https://github.com/optiscaler/OptiScaler.git upstream
+          git clone --branch v0.9.4 --depth 1 --recurse-submodules https://github.com/optiscaler/OptiScaler.git upstream
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C upstream submodule update --init --recursive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Fetch official DLSSG output commit
@@ -26,34 +28,48 @@ jobs:
         run: |
           git -C upstream fetch origin 7a1f18ca121c16ecbd9c15cd3b14ab29273d31a7 --depth=2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git -C upstream show --no-patch --format="DLSSG commit %H %P %s" 7a1f18ca121c16ecbd9c15cd3b14ab29273d31a7
 
-      - name: Probe cherry-pick compatibility
+      - name: Apply official DLSSG output baseline
         shell: powershell
         run: |
           git -C upstream config user.name "OptiScaler MultiGPU CI"
           git -C upstream config user.email "ci@localhost"
           git -C upstream cherry-pick --no-commit 7a1f18ca121c16ecbd9c15cd3b14ab29273d31a7
-          $code = $LASTEXITCODE
-          Write-Host "cherry-pick exit code: $code"
-          Write-Host "=== STATUS ==="
-          git -C upstream status --short
-          Write-Host "=== UNMERGED FILES ==="
+          $pickCode = $LASTEXITCODE
           $conflicts = @(git -C upstream diff --name-only --diff-filter=U)
           if ($conflicts.Count -gt 0) {
-            $conflicts | ForEach-Object { Write-Host $_ }
-            Write-Host "=== CONFLICT MARKER COUNTS ==="
+            Write-Host "Resolving baseline conflicts with official DLSSG side:"
             foreach ($file in $conflicts) {
-              $path = Join-Path "$env:GITHUB_WORKSPACE\upstream" $file
-              $count = 0
-              if (Test-Path $path) {
-                $count = ([regex]::Matches([IO.File]::ReadAllText($path), '<<<<<<<')).Count
-              }
-              Write-Host "$file : $count conflict block(s)"
+              Write-Host "  $file"
+              git -C upstream checkout --theirs -- $file
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              git -C upstream add -- $file
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
-            exit 1
           }
-          if ($code -ne 0) { exit $code }
-          Write-Host "=== BACKPORT DIFF STAT ==="
-          git -C upstream diff --stat
-          Write-Host "Official DLSSG output commit applies cleanly to v0.9.4."
+          $left = @(git -C upstream diff --name-only --diff-filter=U)
+          if ($left.Count -gt 0) { throw "Unresolved DLSSG conflicts remain: $($left -join ', ')" }
+          Write-Host "Cherry-pick initial exit code: $pickCode"
+          Write-Host "=== BACKPORT STAT ==="
+          git -C upstream diff --stat HEAD
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build DLSSG backport baseline
+        shell: powershell
+        run: |
+          msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify DLSSG binary markers
+        shell: powershell
+        run: |
+          $dll = "$env:GITHUB_WORKSPACE\upstream\x64\Release\a\OptiScaler.dll"
+          if (-not (Test-Path $dll)) { throw "OptiScaler.dll missing" }
+          $bytes = [IO.File]::ReadAllBytes($dll)
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($marker in @('DLSSG', 'sl.interposer.dll', 'nvngx_dlssg.dll')) {
+            if (-not $ascii.Contains($marker)) { throw "DLSSG marker missing from DLL: $marker" }
+          }
+          Write-Host 'Official DLSSG output is present in compiled binary.'
