@@ -1,0 +1,111 @@
+LT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
+-                            const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
++                            const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP,
++                            bool skipOverlay = false)
+ {
+     if (State::Instance().isShuttingDown)
+     {
+@@ -369,8 +371,10 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT
+         if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
+             currentFeature->TickFrozenCheck();
+ 
+-        // Draw overlay
+-        MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
++        // Draw overlay. Multi-GPU virtual swapchains draw the overlay to the main-GPU
++        // virtual backbuffer before it is copied to the secondary adapter.
++        if (!skipOverlay)
++            MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
+ 
+         LOG_DEBUG("Calling fakenvapi");
+         if (State::Instance().activeFgOutput == FGOutput::FSRFG || State::Instance().activeFgOutput == FGOutput::XeFG)
+@@ -417,8 +421,9 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT
+ }
+ 
+ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags,
+-                                               bool isUWP)
+-    : _real(real), _device(pDevice), _handle(hWnd), _refcount(1), _uwp(isUWP)
++                                               bool isUWP, bool multiGpuVirtualBackbuffer)
++    : _real(real), _device(pDevice), _handle(hWnd), _refcount(1), _uwp(isUWP),
++      _multiGpuVirtualBackbufferRequested(multiGpuVirtualBackbuffer)
+ {
+     _id = ++scCount;
+     _lastFlags = flags;
+@@ -444,10 +449,163 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
+ 
+     _device2 = _device;
+ 
++    if (_multiGpuVirtualBackbufferRequested)
++    {
++        _multiGpuVirtualBackbufferReady = InitMultiGPUVirtualBackbuffers();
++        LOG_INFO("MultiGPU v6: virtual backbuffer initialization: {}", _multiGpuVirtualBackbufferReady);
++    }
++
+     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
+ }
+ 
+-WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() {}
++WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() { ReleaseMultiGPUVirtualBackbuffers(); }
++
++bool WrappedIDXGISwapChain4::InitMultiGPUVirtualBackbuffers()
++{
++    ReleaseMultiGPUVirtualBackbuffers();
++
++    if (!_multiGpuVirtualBackbufferRequested || _real == nullptr || _device == nullptr ||
++        State::Instance().currentFG == nullptr || !State::Instance().currentFG->MultiGPUActive())
++        return false;
++
++    ID3D12CommandQueue* renderQueue = nullptr;
++    if (FAILED(_device->QueryInterface(IID_PPV_ARGS(&renderQueue))) || renderQueue == nullptr)
++    {
++        LOG_ERROR("MultiGPU v6: virtual swapchain did not receive a D3D12 render queue");
++        return false;
++    }
++    _multiGpuRenderQueue.Attach(renderQueue);
++
++    ID3D12Device* renderDevice = nullptr;
++    if (FAILED(_multiGpuRenderQueue->GetDevice(IID_PPV_ARGS(&renderDevice))) || renderDevice == nullptr)
++    {
++        LOG_ERROR("MultiGPU v6: failed obtaining render device for virtual backbuffers");
++        ReleaseMultiGPUVirtualBackbuffers();
++        return false;
++    }
++    _multiGpuRenderDevice.Attach(renderDevice);
++
++    _multiGpuRuntime = State::Instance().currentFG->MultiGPURuntime();
++    if (_multiGpuRuntime == nullptr || !_multiGpuRuntime->IsActive() ||
++        !MultiGPU::SameLuid(_multiGpuRuntime->RenderLuid(), _multiGpuRenderDevice->GetAdapterLuid()))
++    {
++        LOG_ERROR("MultiGPU v6: FG runtime is not compatible with the render device");
++        ReleaseMultiGPUVirtualBackbuffers();
++        return false;
++    }
++
++    DXGI_SWAP_CHAIN_DESC scDesc {};
++    if (FAILED(_real->GetDesc(&scDesc)) || scDesc.BufferCount == 0)
++    {
++        LOG_ERROR("MultiGPU v6: failed reading secondary proxy swapchain description");
++        ReleaseMultiGPUVirtualBackbuffers();
++        return false;
++    }
++
++    _multiGpuVirtualBackbuffers.resize(scDesc.BufferCount);
++    _multiGpuBackbufferBridges.resize(scDesc.BufferCount);
++
++    for (UINT i = 0; i < scDesc.BufferCount; ++i)
++    {
++        Microsoft::WRL::ComPtr<ID3D12Resource> fgBackbuffer;
++        if (FAILED(_real->GetBuffer(i, IID_PPV_ARGS(&fgBackbuffer))) || fgBackbuffer == nullptr)
++        {
++            LOG_ERROR("MultiGPU v6: failed obtaining secondary backbuffer {}", i);
++            ReleaseMultiGPUVirtualBackbuffers();
++            return false;
++        }
++
++        auto desc = fgBackbuffer->GetDesc();
++        D3D12_HEAP_PROPERTIES heapProps {};
++        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
++        heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
++        heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
++        heapProps.CreationNodeMask = 1;
++        heapProps.VisibleNodeMask = 1;
++        auto hr = _multiGpuRenderDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &de

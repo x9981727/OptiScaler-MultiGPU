@@ -1,0 +1,126 @@
+sc,
++                                                                  D3D12_RESOURCE_STATE_PRESENT, nullptr,
++                                                                  IID_PPV_ARGS(&_multiGpuVirtualBackbuffers[i]));
++        if (FAILED(hr))
++        {
++            LOG_ERROR("MultiGPU v6: CreateCommittedResource virtual backbuffer {} failed: {:X}", i, (UINT) hr);
++            ReleaseMultiGPUVirtualBackbuffers();
++            return false;
++        }
++
++        _multiGpuVirtualBackbuffers[i]->SetName(std::format(L"OptiScaler MultiGPU Virtual Backbuffer {}", i).c_str());
++        auto bridge = std::make_unique<MultiGPU::CrossAdapterTextureBridge>();
++        if (!bridge->Initialize(_multiGpuRuntime, _multiGpuVirtualBackbuffers[i].Get()))
++        {
++            LOG_ERROR("MultiGPU v6: failed creating cross-adapter bridge for virtual backbuffer {}", i);
++            ReleaseMultiGPUVirtualBackbuffers();
++            return false;
++        }
++        _multiGpuBackbufferBridges[i] = std::move(bridge);
++    }
++
++    LOG_INFO("MultiGPU v6: {} main-GPU virtual backbuffers created for secondary proxy swapchain",
++             _multiGpuVirtualBackbuffers.size());
++    return true;
++}
++
++void WrappedIDXGISwapChain4::ReleaseMultiGPUVirtualBackbuffers()
++{
++    _multiGpuBackbufferBridges.clear();
++    _multiGpuVirtualBackbuffers.clear();
++    _multiGpuRuntime = nullptr;
++    _multiGpuRenderDevice.Reset();
++    _multiGpuRenderQueue.Reset();
++    _multiGpuVirtualBackbufferReady = false;
++}
++
++bool WrappedIDXGISwapChain4::TransferMultiGPUVirtualBackbuffer()
++{
++    if (!_multiGpuVirtualBackbufferReady || _multiGpuRuntime == nullptr || _real3 == nullptr ||
++        _multiGpuRenderQueue == nullptr)
++        return false;
++
++    const UINT index = _real3->GetCurrentBackBufferIndex();
++    if (index >= _multiGpuVirtualBackbuffers.size() || index >= _multiGpuBackbufferBridges.size() ||
++        _multiGpuBackbufferBridges[index] == nullptr)
++        return false;
++
++    auto renderCmd = _multiGpuRuntime->BeginRenderTransfer(index, _multiGpuRenderQueue.Get());
++    if (renderCmd == nullptr ||
++        !_multiGpuBackbufferBridges[index]->RecordRenderCopy(renderCmd, _multiGpuVirtualBackbuffers[index].Get(),
++                                                              D3D12_RESOURCE_STATE_PRESENT) ||
++        !_multiGpuRuntime->EndRenderTransfer(index, _multiGpuRenderQueue.Get()))
++    {
++        _multiGpuRuntime->AbortRenderTransfer(index);
++        LOG_ERROR("MultiGPU v6: render-side virtual backbuffer export failed for index {}", index);
++        return false;
++    }
++
++    if (!_multiGpuRuntime->SignalRenderAndWaitOnFG(_multiGpuRenderQueue.Get()))
++    {
++        LOG_ERROR("MultiGPU v6: render->FG synchronization failed for virtual backbuffer {}", index);
++        return false;
++    }
++
++    Microsoft::WRL::ComPtr<ID3D12Resource> fgBackbuffer;
++    if (FAILED(_real->GetBuffer(index, IID_PPV_ARGS(&fgBackbuffer))) || fgBackbuffer == nullptr)
++    {
++        LOG_ERROR("MultiGPU v6: failed obtaining destination secondary backbuffer {}", index);
++        return false;
++    }
++
++    auto fgCmd = _multiGpuRuntime->BeginFGTransfer(index);
++    if (fgCmd == nullptr ||
++        !_multiGpuBackbufferBridges[index]->RecordFGImport(fgCmd, fgBackbuffer.Get(), D3D12_RESOURCE_STATE_PRESENT) ||
++        !_multiGpuRuntime->EndFGTransfer(index))
++    {
++        _multiGpuRuntime->AbortFGTransfer(index);
++        LOG_ERROR("MultiGPU v6: FG-side virtual backbuffer import failed for index {}", index);
++        return false;
++    }
++
++    LOG_TRACE("MultiGPU v6: virtual backbuffer {} copied to secondary proxy swapchain", index);
++    return true;
++}
+ 
+ //
+ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::QueryInterface(REFIID riid, void** ppvObject)
+@@ -642,6 +800,19 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetParent(REFIID riid, void**
+ //
+ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDevice(REFIID riid, void** ppDevice)
+ {
++    if (_multiGpuVirtualBackbufferReady)
++    {
++        if (_device != nullptr)
++        {
++            auto hr = _device->QueryInterface(riid, ppDevice);
++            if (SUCCEEDED(hr))
++                return hr;
++        }
++
++        if (_multiGpuRenderDevice != nullptr)
++            return _multiGpuRenderDevice->QueryInterface(riid, ppDevice);
++    }
++
+     return _real->GetDevice(riid, ppDevice);
+ }
+ 
+@@ -659,7 +830,17 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
+ 
+     if ((Flags & DXGI_PRESENT_TEST) == 0)
+     {
+-        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp);
++        if (_multiGpuVirtualBackbufferReady)
++        {
++            MenuOverlayDx::Present(this, SyncInterval, Flags, nullptr, _device, _handle, _uwp);
++            if (!TransferMultiGPUVirtualBackbuffer())
++                return DXGI_ERROR_DEVICE_REMOVED;
++            result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp, true);
++        }
++        else
++        {
++            result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp);
++        }
+ 
+         // When Reflex can't be used to limit, sleep in present
+         if (!State::Instance().ref

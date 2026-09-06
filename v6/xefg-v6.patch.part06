@@ -1,0 +1,116 @@
+lexLimitsFps && State::Instance().activeFgOutput == FGOutput::NoFG &&
+@@ -676,8 +857,16 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
+ 
+ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
+ {
+-    auto result = _real->GetBuffer(Buffer, riid, ppSurface);
+-    return result;
++    if (_multiGpuVirtualBackbufferReady)
++    {
++        if (ppSurface == nullptr || Buffer >= _multiGpuVirtualBackbuffers.size() ||
++            _multiGpuVirtualBackbuffers[Buffer] == nullptr)
++            return DXGI_ERROR_INVALID_CALL;
++
++        return _multiGpuVirtualBackbuffers[Buffer]->QueryInterface(riid, ppSurface);
++    }
++
++    return _real->GetBuffer(Buffer, riid, ppSurface);
+ }
+ 
+ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetFullscreenState(BOOL Fullscreen, IDXGIOutput* pTarget)
+@@ -791,6 +980,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
+ 
+     WaitForGPUIdle(_device);
+ 
++    const bool recreateMultiGpuVirtualBackbuffers = _multiGpuVirtualBackbufferRequested;
++    if (recreateMultiGpuVirtualBackbuffers)
++        ReleaseMultiGPUVirtualBackbuffers();
++
+     // Release swapchain backbuffers to prevent errors when resizing
+     /*
+     if (State::Instance().activeFgOutput != FGOutput::NoFG && State::Instance().activeFgOutput != FGOutput::Nukems &&
+@@ -863,6 +1056,13 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
+     if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)
+         Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
+ 
++    if (result == S_OK && recreateMultiGpuVirtualBackbuffers)
++    {
++        _multiGpuVirtualBackbufferReady = InitMultiGPUVirtualBackbuffers();
++        if (!_multiGpuVirtualBackbufferReady)
++            LOG_ERROR("MultiGPU v6: failed recreating virtual backbuffers after ResizeBuffers");
++    }
++
+ #ifdef DXGI_DEBUG_ENABLED
+     if (result != S_OK)
+         ReadDxgiInfoQueue();
+@@ -1009,7 +1209,17 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
+ 
+     if ((Flags & DXGI_PRESENT_TEST) == 0)
+     {
+-        result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp);
++        if (_multiGpuVirtualBackbufferReady)
++        {
++            MenuOverlayDx::Present(this, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp);
++            if (!TransferMultiGPUVirtualBackbuffer())
++                return DXGI_ERROR_DEVICE_REMOVED;
++            result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp, true);
++        }
++        else
++        {
++            result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp);
++        }
+ 
+         // When Reflex can't be used to limit, sleep in present
+         if (!State::Instance().reflexLimitsFps && State::Instance().activeFgOutput == FGOutput::NoFG &&
+@@ -1167,6 +1377,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
+ 
+     WaitForGPUIdle(_device);
+ 
++    const bool recreateMultiGpuVirtualBackbuffers = _multiGpuVirtualBackbufferRequested;
++    if (recreateMultiGpuVirtualBackbuffers)
++        ReleaseMultiGPUVirtualBackbuffers();
++
+     // Release swapchain backbuffers to prevent errors when resizing
+     if (State::Instance().activeFgOutput != FGOutput::NoFG && State::Instance().activeFgOutput != FGOutput::Nukems &&
+         State::Instance().currentFG != nullptr)
+@@ -1263,6 +1477,13 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
+     if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)
+         Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
+ 
++    if (result == S_OK && recreateMultiGpuVirtualBackbuffers)
++    {
++        _multiGpuVirtualBackbufferReady = InitMultiGPUVirtualBackbuffers();
++        if (!_multiGpuVirtualBackbufferReady)
++            LOG_ERROR("MultiGPU v6: failed recreating virtual backbuffers after ResizeBuffers1");
++    }
++
+ #ifdef DXGI_DEBUG_ENABLED
+     if (result != S_OK)
+         ReadDxgiInfoQueue();
+diff --git a/OptiScaler/wrapped/wrapped_swapchain.h b/OptiScaler/wrapped/wrapped_swapchain.h
+index 98254c8..f9229c3 100644
+--- a/OptiScaler/wrapped/wrapped_swapchain.h
++++ b/OptiScaler/wrapped/wrapped_swapchain.h
+@@ -6,15 +6,22 @@
+ 
+ #include "dxgi1_6.h"
+ #include "d3d12.h"
++#include <wrl/client.h>
++#include <framegen/MultiGPU_Dx12.h>
++#include <memory>
++#include <vector>
+ 
+ #define USE_LOCAL_MUTEX
+ 
+ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChain4 final : public IDXGISwapChain4
+ {
+   public:
+-    WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP);
++    WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP,
++                             bool multiGpuVirtualBackbuffer = false);
+     virtual ~WrappedIDXGISwapChain4();
+ 
++    bool MultiGPUVirtualBackbufferReady() const { return _multiGpuVirtualBackbufferReady; }
++
+     // implement IUnknown
+     HRESULT STDMETHODCALLT

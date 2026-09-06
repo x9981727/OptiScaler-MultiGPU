@@ -1,0 +1,116 @@
+c_enum::enum_name(type), index);
++        return xefg_swapchain_d3d12_resource_data_t {};
++    }
+ 
+     switch (type)
+     {
+@@ -265,7 +276,13 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
+         if (State::Instance().currentD3D12Device == nullptr)
+             return false;
+ 
+-        CreateSwapchainContext(State::Instance().currentD3D12Device);
++        EnsureMultiGPURuntime(State::Instance().currentD3D12Device);
++        auto xefgDevice = SelectedFGDevice(State::Instance().currentD3D12Device);
++        CreateSwapchainContext(xefgDevice);
++        if (IsMultiGPUActive())
++            LOG_INFO("MultiGPU v6: XeFG context created on secondary GPU '{}', LUID={}",
++                     wstring_to_string(_multiGpuRuntime->FGAdapterName()),
++                     wstring_to_string(MultiGPU::LuidToString(_multiGpuRuntime->FGLuid())));
+ 
+         if (_swapChainContext == nullptr)
+             return false;
+@@ -390,7 +407,8 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
+ #endif // !DONT_USE_XMX
+ 
+     xefg_swapchain_result_t result;
+-    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, realQueue, factory12,
++    auto xefgQueue = SelectedFGQueue(realQueue);
++    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, xefgQueue, factory12,
+                                                      &params);
+ 
+     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+@@ -460,7 +478,13 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
+         if (State::Instance().currentD3D12Device == nullptr)
+             return false;
+ 
+-        CreateSwapchainContext(State::Instance().currentD3D12Device);
++        EnsureMultiGPURuntime(State::Instance().currentD3D12Device);
++        auto xefgDevice = SelectedFGDevice(State::Instance().currentD3D12Device);
++        CreateSwapchainContext(xefgDevice);
++        if (IsMultiGPUActive())
++            LOG_INFO("MultiGPU v6: XeFG context created on secondary GPU '{}', LUID={}",
++                     wstring_to_string(_multiGpuRuntime->FGAdapterName()),
++                     wstring_to_string(MultiGPU::LuidToString(_multiGpuRuntime->FGLuid())));
+ 
+         if (_swapChainContext == nullptr)
+             return false;
+@@ -551,7 +575,8 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
+ #endif // !DONT_USE_XMX
+ 
+     xefg_swapchain_result_t result;
+-    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, desc, pFullscreenDesc, realQueue,
++    auto xefgQueue = SelectedFGQueue(realQueue);
++    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, desc, pFullscreenDesc, xefgQueue,
+                                                      factory12, &params);
+ 
+     State::Instance().skipSpoofing = false;
+@@ -582,6 +607,7 @@ void XeFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
+     LOG_DEBUG("");
+ 
+     _device = device;
++    EnsureMultiGPURuntime(device);
+     CreateObjects(device);
+ 
+     if (_fgContext == nullptr && _swapChainContext != nullptr)
+@@ -714,6 +740,48 @@ bool XeFG_Dx12::Dispatch()
+ 
+     auto& state = State::Instance();
+ 
++    if (IsMultiGPUActive())
++    {
++        if (!FlushMultiGPUResources(fIndex))
++        {
++            LOG_ERROR("MultiGPU v6: failed importing XeFG frame resources for frame {}", fIndex);
++            return false;
++        }
++
++        auto tagCmdList = _multiGpuRuntime->BeginFGTransfer(static_cast<UINT>(fIndex));
++        if (tagCmdList == nullptr)
++        {
++            LOG_ERROR("MultiGPU v6: failed opening secondary XeFG tag command list");
++            return false;
++        }
++
++        const auto frameId = static_cast<uint32_t>(willDispatchFrame);
++        for (auto type : { FG_ResourceType::Depth, FG_ResourceType::Velocity })
++        {
++            auto resourceParam = GetResourceData(type, fIndex);
++            if (resourceParam.pResource == nullptr)
++            {
++                _multiGpuRuntime->AbortFGTransfer(static_cast<UINT>(fIndex));
++                return false;
++            }
++
++            auto tagResult = XeFGProxy::D3D12TagFrameResource()(_swapChainContext, tagCmdList, frameId, &resourceParam);
++            LOG_DEBUG("MultiGPU v6: D3D12TagFrameResource frameId: {}, type: {}, result: {} ({})", frameId,
++                      magic_enum::enum_name(type), magic_enum::enum_name(tagResult), (int32_t) tagResult);
++            if (tagResult != XEFG_SWAPCHAIN_RESULT_SUCCESS)
++            {
++                _multiGpuRuntime->AbortFGTransfer(static_cast<UINT>(fIndex));
++                return false;
++            }
++        }
++
++        if (!_multiGpuRuntime->EndFGTransfer(static_cast<UINT>(fIndex)))
++        {
++            LOG_ERROR("MultiGPU v6: failed submitting secondary XeFG tag command list");
++            return false;
++        }
++    }
++
+     if (XeFGProxy::SetUiCompositionState() != nullptr &&
+         Config::Instance()->FGXeFGUIComposition.value_or_default() != _uiComposition && IsUsingHudless(fIndex))
+     {
+@@ -1320,6 +1388,15 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
+ 
+     auto& type = inp

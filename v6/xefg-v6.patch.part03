@@ -1,0 +1,125 @@
+     (XeFGProxy::SetUiCompositionState() != nullptr || Config::Instance()->FGDrawUIOverFG.value_or_default()))
++                    {
++                        auto frameId = static_cast<uint32_t>(_frameCount - indexDiff);
++                        auto result =
++                            XeFGProxy::D3D12TagFrameResource()(_swapChainContext, fResource->cmdList, frameId, &resourceParam);
++                        LOG_DEBUG("D3D12TagFrameResource, frameId: {}, type: {} result: {} ({})", frameId,
++                                  magic_enum::enum_name(type), magic_enum::enum_name(result), (int32_t) result);
++
++                        if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
++                        {
++                            State::Instance().FGchanged = true;
++                            UpdateTarget();
++                            Deactivate();
++
++                            return false;
++                        }
++                    }
+ 
+-                return false;
+-            }
+         }
+ 
+         // Potentially we don't need to restore but do it just to be safe
+-        if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
++        if (!IsMultiGPUActive() && inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
+         {
+             ResourceBarrier(inputResource->cmdList, inputResource->resource, D3D12_RESOURCE_STATE_COPY_DEST,
+                             inputResource->state);
+diff --git a/OptiScaler/hooks/FG_Hooks.cpp b/OptiScaler/hooks/FG_Hooks.cpp
+index 1327893..98c92fb 100644
+--- a/OptiScaler/hooks/FG_Hooks.cpp
++++ b/OptiScaler/hooks/FG_Hooks.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <framegen/ffx/FSRFG_Dx12.h>
+ #include <framegen/xefg/XeFG_Dx12.h>
++#include <wrapped/wrapped_swapchain.h>
+ 
+ #include <inputs/FG/FSR3_Dx12_FG.h>
+ #include <inputs/FG/FfxApi_Dx12_FG.h>
+@@ -190,11 +191,31 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
+         }
+ 
+         _hwnd = pDesc->OutputWindow;
+-        State::Instance().currentFGSwapchain = *ppSwapChain;
++        auto rawFGSwapchain = *ppSwapChain;
++        HookFGSwapchain(rawFGSwapchain);
+ 
+-        HookFGSwapchain(*ppSwapChain);
++        if (State::Instance().activeFgOutput == FGOutput::XeFG && fg->MultiGPUActive())
++        {
++            auto wrapped = new WrappedIDXGISwapChain4(rawFGSwapchain, pDevice, pDesc->OutputWindow, pDesc->Flags,
++                                                       false, true);
++            if (!wrapped->MultiGPUVirtualBackbufferReady())
++            {
++                LOG_ERROR("MultiGPU v6: failed creating virtual XeFG swapchain wrapper");
++                wrapped->Release();
++                return E_INVALIDARG;
++            }
+ 
+-        State::Instance().currentSwapchain = *ppSwapChain;
++            State::Instance().currentFGSwapchain = rawFGSwapchain;
++            State::Instance().currentWrappedSwapchain = wrapped;
++            State::Instance().currentSwapchain = wrapped;
++            *ppSwapChain = wrapped;
++            LOG_INFO("MultiGPU v6: XeFG proxy swapchain virtualized for the render adapter");
++        }
++        else
++        {
++            State::Instance().currentFGSwapchain = rawFGSwapchain;
++            State::Instance().currentSwapchain = rawFGSwapchain;
++        }
+ 
+         return S_OK;
+     }
+@@ -299,10 +320,30 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
+         }
+ 
+         _hwnd = hWnd;
+-        State::Instance().currentFGSwapchain = *ppSwapChain;
++        auto rawFGSwapchain = (IDXGISwapChain*) *ppSwapChain;
++        HookFGSwapchain(rawFGSwapchain);
+ 
+-        HookFGSwapchain(*ppSwapChain);
+-        State::Instance().currentSwapchain = *ppSwapChain;
++        if (State::Instance().activeFgOutput == FGOutput::XeFG && fg->MultiGPUActive())
++        {
++            auto wrapped = new WrappedIDXGISwapChain4(rawFGSwapchain, pDevice, hWnd, pDesc->Flags, false, true);
++            if (!wrapped->MultiGPUVirtualBackbufferReady())
++            {
++                LOG_ERROR("MultiGPU v6: failed creating virtual XeFG swapchain1 wrapper");
++                wrapped->Release();
++                return E_INVALIDARG;
++            }
++
++            State::Instance().currentFGSwapchain = rawFGSwapchain;
++            State::Instance().currentWrappedSwapchain = wrapped;
++            State::Instance().currentSwapchain = wrapped;
++            *ppSwapChain = (IDXGISwapChain1*) wrapped;
++            LOG_INFO("MultiGPU v6: XeFG proxy swapchain1 virtualized for the render adapter");
++        }
++        else
++        {
++            State::Instance().currentFGSwapchain = rawFGSwapchain;
++            State::Instance().currentSwapchain = rawFGSwapchain;
++        }
+ 
+         return S_OK;
+     }
+diff --git a/OptiScaler/wrapped/wrapped_swapchain.cpp b/OptiScaler/wrapped/wrapped_swapchain.cpp
+index cfa1d0e..251e04b 100644
+--- a/OptiScaler/wrapped/wrapped_swapchain.cpp
++++ b/OptiScaler/wrapped/wrapped_swapchain.cpp
+@@ -7,6 +7,7 @@
+ #include <nvapi/fakenvapi.h>
+ #include <hooks/Reflex_Hooks.h>
+ #include <hooks/D3D12_Hooks.h>
++#include <framegen/IFGFeature_Dx12.h>
+ 
+ #include <menu/menu_overlay_dx.h>
+ 
+@@ -143,7 +144,8 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
+ #endif
+ 
+ static HRESU

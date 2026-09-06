@@ -1,0 +1,23 @@
+YPE QueryInterface(REFIID riid, void** ppvObject) override;
+     ULONG STDMETHODCALLTYPE AddRef() override;
+@@ -94,6 +101,20 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
+ 
+     HWND _handle = nullptr;
+ 
++    // Multi-GPU XeFG/DLSSG presentation virtualization. The real swapchain belongs to the
++    // secondary adapter; the game only sees these render-device-local virtual backbuffers.
++    bool _multiGpuVirtualBackbufferRequested = false;
++    bool _multiGpuVirtualBackbufferReady = false;
++    Microsoft::WRL::ComPtr<ID3D12CommandQueue> _multiGpuRenderQueue;
++    Microsoft::WRL::ComPtr<ID3D12Device> _multiGpuRenderDevice;
++    MultiGPU::Dx12Runtime* _multiGpuRuntime = nullptr; // owned by current FG feature
++    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> _multiGpuVirtualBackbuffers;
++    std::vector<std::unique_ptr<MultiGPU::CrossAdapterTextureBridge>> _multiGpuBackbufferBridges;
++
++    bool InitMultiGPUVirtualBackbuffers();
++    void ReleaseMultiGPUVirtualBackbuffers();
++    bool TransferMultiGPUVirtualBackbuffer();
++
+ #ifdef USE_LOCAL_MUTEX
+     OwnedMutex _localMutex;
+ #endif

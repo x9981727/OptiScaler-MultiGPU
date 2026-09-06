@@ -1,0 +1,139 @@
+diff --git a/OptiScaler/framegen/IFGFeature_Dx12.h b/OptiScaler/framegen/IFGFeature_Dx12.h
+index f134efe..d8c5dec 100644
+--- a/OptiScaler/framegen/IFGFeature_Dx12.h
++++ b/OptiScaler/framegen/IFGFeature_Dx12.h
+@@ -128,6 +128,10 @@ class IFGFeature_Dx12 : public virtual IFGFeature
+     bool GetResourceCopy(FG_ResourceType type, D3D12_RESOURCE_STATES bufferState, ID3D12Resource* output);
+     ID3D12CommandQueue* GetCommandQueue();
+ 
++    // Public read-only access for the DXGI virtual-backbuffer layer.
++    bool MultiGPUActive() const { return IsMultiGPUActive(); }
++    MultiGPU::Dx12Runtime* MultiGPURuntime() const { return _multiGpuRuntime.get(); }
++
+     bool HasResource(FG_ResourceType type, int index = -1) override final;
+ 
+     IFGFeature_Dx12() = default;
+diff --git a/OptiScaler/framegen/MultiGPU_Dx12.cpp b/OptiScaler/framegen/MultiGPU_Dx12.cpp
+index 3ea2138..6db6850 100644
+--- a/OptiScaler/framegen/MultiGPU_Dx12.cpp
++++ b/OptiScaler/framegen/MultiGPU_Dx12.cpp
+@@ -684,6 +684,41 @@ bool Dx12Runtime::SignalFGAndWaitOnRender(ID3D12CommandQueue* renderQueue, UINT6
+     return true;
+ }
+ 
++bool CrossAdapterTextureBridge::RecordFGImport(ID3D12GraphicsCommandList* fgCmdList, ID3D12Resource* fgTarget,
++                                                D3D12_RESOURCE_STATES targetState)
++{
++    if (_runtime == nullptr || !_runtime->IsActive() || fgCmdList == nullptr || fgTarget == nullptr ||
++        _fgSharedBuffer == nullptr)
++        return false;
++
++    const auto targetDesc = fgTarget->GetDesc();
++    if (targetDesc.Dimension != _sourceDesc.Dimension || targetDesc.Width != _sourceDesc.Width ||
++        targetDesc.Height != _sourceDesc.Height || targetDesc.DepthOrArraySize != _sourceDesc.DepthOrArraySize ||
++        targetDesc.MipLevels != _sourceDesc.MipLevels || targetDesc.Format != _sourceDesc.Format ||
++        targetDesc.SampleDesc.Count != _sourceDesc.SampleDesc.Count)
++        return false;
++
++    Transition(fgCmdList, _fgSharedBuffer.Get(), _fgSharedState, D3D12_RESOURCE_STATE_COPY_SOURCE);
++    Transition(fgCmdList, fgTarget, targetState, D3D12_RESOURCE_STATE_COPY_DEST);
++
++    D3D12_TEXTURE_COPY_LOCATION src {};
++    src.pResource = _fgSharedBuffer.Get();
++    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++    src.PlacedFootprint = _footprint;
++
++    D3D12_TEXTURE_COPY_LOCATION dst {};
++    dst.pResource = fgTarget;
++    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    dst.SubresourceIndex = 0;
++
++    fgCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
++
++    Transition(fgCmdList, _fgSharedBuffer.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
++    Transition(fgCmdList, fgTarget, D3D12_RESOURCE_STATE_COPY_DEST, targetState);
++    _fgSharedState = D3D12_RESOURCE_STATE_COMMON;
++    return true;
++}
++
+ bool CrossAdapterTextureBridge::RecordFGTransition(ID3D12GraphicsCommandList* fgCmdList,
+                                                     D3D12_RESOURCE_STATES finalState)
+ {
+diff --git a/OptiScaler/framegen/MultiGPU_Dx12.h b/OptiScaler/framegen/MultiGPU_Dx12.h
+index b5beaf9..e1465b6 100644
+--- a/OptiScaler/framegen/MultiGPU_Dx12.h
++++ b/OptiScaler/framegen/MultiGPU_Dx12.h
+@@ -232,6 +232,11 @@ class CrossAdapterTextureBridge
+     // Records shared buffer -> local FG texture on a command list owned by the FG device.
+     bool RecordFGCopy(ID3D12GraphicsCommandList* fgCmdList, D3D12_RESOURCE_STATES finalState);
+ 
++    // Imports the shared buffer directly into an arbitrary texture owned by the FG adapter.
++    // Used by the virtual-backbuffer path to feed the real XeFG/DLSSG proxy swapchain.
++    bool RecordFGImport(ID3D12GraphicsCommandList* fgCmdList, ID3D12Resource* fgTarget,
++                        D3D12_RESOURCE_STATES targetState);
++
+     // Changes the FG-local texture state without copying. Used for output surfaces that are
+     // written by the FG algorithm rather than imported from the render adapter.
+     bool RecordFGTransition(ID3D12GraphicsCommandList* fgCmdList, D3D12_RESOURCE_STATES finalState);
+diff --git a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
+index edf83ba..1e6ffb6 100644
+--- a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
++++ b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
+@@ -188,8 +188,19 @@ xefg_swapchain_d3d12_resource_data_t XeFG_Dx12::GetResourceData(FG_ResourceType
+ 
+     resourceParam.resourceBase = { fResource->left, fResource->top };
+     resourceParam.resourceSize = { static_cast<uint32_t>(fResource->width), fResource->height };
+-    resourceParam.pResource = fResource->GetResource();
++    resourceParam.pResource = IsMultiGPUActive() ? GetMultiGPUResource(type, index) : fResource->GetResource();
+     resourceParam.incomingState = fResource->state;
++    if (IsMultiGPUActive() &&
++        (resourceParam.incomingState == D3D12_RESOURCE_STATE_COPY_DEST ||
++         resourceParam.incomingState == D3D12_RESOURCE_STATE_COPY_SOURCE ||
++         resourceParam.incomingState == D3D12_RESOURCE_STATE_COMMON))
++        resourceParam.incomingState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++
++    if (IsMultiGPUActive() && resourceParam.pResource == nullptr)
++    {
++        LOG_ERROR("MultiGPU v6: secondary XeFG resource missing for {} frame {}", magic_enum::enum_name(type), index);
++        return xefg_swapchain_d3d12_resource_data_t {};
++    }
+ 
+     switch (type)
+     {
+@@ -265,7 +276,13 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
+         if (State::Instance().currentD3D12Device == nullptr)
+             return false;
+ 
+-        CreateSwapchainContext(State::Instance().currentD3D12Device);
++        EnsureMultiGPURuntime(State::Instance().currentD3D12Device);
++        auto xefgDevice = SelectedFGDevice(State::Instance().currentD3D12Device);
++        CreateSwapchainContext(xefgDevice);
++        if (IsMultiGPUActive())
++            LOG_INFO("MultiGPU v6: XeFG context created on secondary GPU '{}', LUID={}",
++                     wstring_to_string(_multiGpuRuntime->FGAdapterName()),
++                     wstring_to_string(MultiGPU::LuidToString(_multiGpuRuntime->FGLuid())));
+ 
+         if (_swapChainContext == nullptr)
+             return false;
+@@ -390,7 +407,8 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
+ #endif // !DONT_USE_XMX
+ 
+     xefg_swapchain_result_t result;
+-    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, realQueue, factory12,
++    auto xefgQueue = SelectedFGQueue(realQueue);
++    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, xefgQueue, factory12,
+                                                      &params);
+ 
+     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+@@ -460,7 +478,13 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
+         if (State::Instance().currentD3D12Device == nullptr)
+             return false;
+ 
+-        CreateSwapchainContext(State::Instance().currentD3D12Device);
++        EnsureMultiGPURuntime(State::Instance().currentD3D12Device);
++        auto xefgDevice = SelectedFGDevice(State::Instance().currentD3D12Device);
++        CreateSwapchainContext(xefgDevice);
++        if (IsMultiGPUActive())
++            LOG_INFO("MultiGPU v6: XeFG context created on secondary GPU '{}', LUID={}",
++                     wstring_to_string(_multiGpuRuntime->FGAdapterName()),
++                     wstring_to_string(MultiGPU::LuidToString(_multiGpuRuntime->FGLuid())));
