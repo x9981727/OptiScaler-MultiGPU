@@ -1,4 +1,4 @@
-name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v7 (Unsigned)
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v9 (Unsigned)
 
 on:
   push:
@@ -124,13 +124,27 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
+      - name: Apply v9 native initialization and preserve game device
+        shell: powershell
+        run: |
+          python scripts/apply-v9.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Windows exception diagnostics and propagation
+        shell: powershell
+        run: |
+          msbuild v9\diagnostics-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v9\out\diagnostics-test.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Diagnostics test failed: $LASTEXITCODE" }
+
       - name: Build Release
         shell: powershell
         run: |
           msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify v5 v6 and v7 markers are in compiled DLL
+      - name: Verify v9 markers are in compiled DLL
         shell: powershell
         run: |
           $dll = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a\OptiScaler.dll"
@@ -146,7 +160,13 @@ jobs:
             'MultiGPU v6: XeFG proxy swapchain virtualized for the render adapter',
             'MultiGPU v6: virtual backbuffer {} copied to secondary proxy swapchain',
             'MultiGPU v7: isolating XeFG internal DXGI/D3D12 initialization',
-            'MultiGPU v7: passthrough D3D12CreateDevice during XeFG internal initialization',
+            'MultiGPU v9: native D3D12 init call',
+            'MultiGPU v9: native D3D12 init returned',
+            'MultiGPU v9: native DXGI factory2 during XeFG init',
+            'MultiGPU v9: context setup complete; preserved game device',
+            'MultiGPU v9: entering XeFG init with explicit FG device/queue and native driver calls',
+            'MultiGPU v9: XeFG init returned',
+            'MultiGPU v9 XeFG init exception',
             'MultiGPU v7: passthrough XeFG internal CreateSwapChainForHwnd without Opti wrapping'
           )
           foreach ($marker in $markers) {
@@ -160,14 +180,29 @@ jobs:
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v7-unsigned.zip"
+          Copy-Item "$env:GITHUB_WORKSPACE\v9\README-v9.txt" $outDir
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v9-unsigned.zip"
           Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
           if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
+
+          $updateDir = Join-Path $env:GITHUB_WORKSPACE 'asi-update'
+          New-Item -ItemType Directory -Force $updateDir | Out-Null
+          Copy-Item "$outDir\OptiScaler.dll" "$updateDir\OptiScaler.asi"
+          Copy-Item "$env:GITHUB_WORKSPACE\v9\README-update-zhTW.txt" $updateDir
+          Compress-Archive -Path "$updateDir\*" -DestinationPath "$env:GITHUB_WORKSPACE\OptiScaler-MultiGPU-v9-ASI-update.zip" -CompressionLevel Optimal
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v7-unsigned-zip
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v7-unsigned.zip
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v9-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v9-unsigned.zip
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload ASI update ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-MultiGPU-v9-ASI-update
+          path: OptiScaler-MultiGPU-v9-ASI-update.zip
           compression-level: 0
           if-no-files-found: error
