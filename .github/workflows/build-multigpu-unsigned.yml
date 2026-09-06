@@ -1,4 +1,4 @@
-name: Build OptiScaler 0.9.4 MultiGPU FSRFG v2 (Unsigned)
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG v3 (Unsigned)
 
 on:
   push:
@@ -97,6 +97,116 @@ jobs:
           $text = $text.Replace("auto computeResult = FFX_API_RETURN_OK;", "ffxReturnCode_t computeResult = FFX_API_RETURN_OK;")
           [IO.File]::WriteAllText($fsrfg, $text, [Text.UTF8Encoding]::new($false))
 
+      - name: Apply v3 scoped AMD internal adapter override
+        shell: powershell
+        run: |
+          $hooksH = Join-Path $env:GITHUB_WORKSPACE "upstream\OptiScaler\hooks\D3D12_Hooks.h"
+          $hooksCpp = Join-Path $env:GITHUB_WORKSPACE "upstream\OptiScaler\hooks\D3D12_Hooks.cpp"
+          $fsrfg = Join-Path $env:GITHUB_WORKSPACE "upstream\OptiScaler\framegen\ffx\FSRFG_Dx12.cpp"
+
+          # 1) Public scoped switch used only by FSRFG secondary-context creation.
+          $h = [IO.File]::ReadAllText($hooksH)
+          if (-not $h.Contains("SetMultiGPUFGAdapterOverride")) {
+            $needle = "    static void Hook();"
+            if (-not $h.Contains($needle)) { throw "D3D12_Hooks.h insertion point not found" }
+            $h = $h.Replace($needle, "    static void SetMultiGPUFGAdapterOverride(bool enable);`n$needle")
+          }
+          [IO.File]::WriteAllText($hooksH, $h, [Text.UTF8Encoding]::new($false))
+
+          # 2) D3D12CreateDevice hook: when armed and AMD asks for nullptr/default adapter,
+          #    replace it with the user-selected MultiGPU FG adapter. ComPtr keeps the adapter
+          #    alive for the complete hooked function including early returns.
+          $cpp = [IO.File]::ReadAllText($hooksCpp)
+          if (-not $cpp.Contains('#include <framegen/MultiGPU_Dx12.h>')) {
+            $includeNeedle = '#include <Config.h>'
+            if (-not $cpp.Contains($includeNeedle)) { throw "D3D12_Hooks.cpp include insertion point not found" }
+            $cpp = $cpp.Replace($includeNeedle, "$includeNeedle`n#include <framegen/MultiGPU_Dx12.h>")
+          }
+
+          if (-not $cpp.Contains("_forceMultiGPUFGAdapter")) {
+            $stateNeedle = 'static LUID _lastAdapterLuid = {};'
+            if (-not $cpp.Contains($stateNeedle)) { throw "D3D12_Hooks.cpp state insertion point not found" }
+            $cpp = $cpp.Replace($stateNeedle, "$stateNeedle`nstatic thread_local bool _forceMultiGPUFGAdapter = false;")
+          }
+
+          if (-not $cpp.Contains("void D3D12Hooks::SetMultiGPUFGAdapterOverride")) {
+            $fnNeedle = 'VALIDATE_HOOK(hkD3D12CreateDevice, D3d12Proxy::PFN_D3D12CreateDevice)'
+            if (-not $cpp.Contains($fnNeedle)) { throw "hkD3D12CreateDevice marker not found" }
+            $setter = @'
+void D3D12Hooks::SetMultiGPUFGAdapterOverride(bool enable)
+{
+    _forceMultiGPUFGAdapter = enable;
+    LOG_DEBUG("MultiGPU: scoped internal D3D12 adapter override: {}", enable);
+}
+
+'@
+            $cpp = $cpp.Replace($fnNeedle, $setter + $fnNeedle)
+          }
+
+          if (-not $cpp.Contains("forcing internal D3D12CreateDevice(nullptr)")) {
+            $fnPos = $cpp.IndexOf('static HRESULT hkD3D12CreateDevice')
+            if ($fnPos -lt 0) { throw "hkD3D12CreateDevice function not found" }
+            $logNeedle = 'Util::WhoIsTheCaller(_ReturnAddress()));'
+            $logPos = $cpp.IndexOf($logNeedle, $fnPos)
+            if ($logPos -lt 0) { throw "hkD3D12CreateDevice log insertion point not found" }
+            $insertPos = $logPos + $logNeedle.Length
+            $overrideCode = @'
+
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> forcedMultiGpuAdapter;
+    if (_forceMultiGPUFGAdapter && pAdapter == nullptr)
+    {
+        IDXGIAdapter1* rawAdapter = nullptr;
+        if (MultiGPU::TryGetAdapterByLuid(Config::Instance()->FGAdapterLuid.value_or_default(), &rawAdapter))
+        {
+            forcedMultiGpuAdapter.Attach(rawAdapter);
+            pAdapter = forcedMultiGpuAdapter.Get();
+            LOG_INFO("MultiGPU: forcing internal D3D12CreateDevice(nullptr) to configured FG adapter");
+        }
+        else
+        {
+            LOG_ERROR("MultiGPU: failed to resolve configured FG adapter for internal D3D12CreateDevice");
+        }
+    }
+'@
+            $cpp = $cpp.Insert($insertPos, $overrideCode)
+          }
+          [IO.File]::WriteAllText($hooksCpp, $cpp, [Text.UTF8Encoding]::new($false))
+
+          # 3) Arm the override only while the secondary FidelityFX FG context is created.
+          $f = [IO.File]::ReadAllText($fsrfg)
+          if (-not $f.Contains('#include <hooks/D3D12_Hooks.h>')) {
+            $firstInclude = '#include "FSRFG_Dx12.h"'
+            if (-not $f.Contains($firstInclude)) { throw "FSRFG_Dx12 include insertion point not found" }
+            $f = $f.Replace($firstInclude, "$firstInclude`n#include <hooks/D3D12_Hooks.h>")
+          }
+
+          if (-not $f.Contains("SetMultiGPUFGAdapterOverride(true)")) {
+            $ctxNeedle = 'FfxApiProxy::D3D12_CreateContext(&_multiGpuComputeContext'
+            $ctxPos = $f.IndexOf($ctxNeedle)
+            if ($ctxPos -lt 0) { throw "secondary compute context creation call not found" }
+            $secondCtxPos = $f.IndexOf($ctxNeedle, $ctxPos + $ctxNeedle.Length)
+            if ($secondCtxPos -ge 0) { throw "unexpected multiple secondary compute context creation calls" }
+
+            $lineStart = $f.LastIndexOf("`n", $ctxPos)
+            if ($lineStart -lt 0) { $lineStart = 0 } else { $lineStart++ }
+            $semi = $f.IndexOf(';', $ctxPos)
+            if ($semi -lt 0) { throw "secondary compute context statement terminator not found" }
+            $lineText = $f.Substring($lineStart, $semi - $lineStart + 1)
+            $indent = [regex]::Match($lineText, '^\s*').Value
+
+            $f = $f.Insert($semi + 1, "`n${indent}D3D12Hooks::SetMultiGPUFGAdapterOverride(false);")
+            $f = $f.Insert($lineStart, "${indent}D3D12Hooks::SetMultiGPUFGAdapterOverride(true);`n")
+          }
+          [IO.File]::WriteAllText($fsrfg, $f, [Text.UTF8Encoding]::new($false))
+
+          # Validate that all three v3 pieces were actually injected before compiling.
+          $checkH = [IO.File]::ReadAllText($hooksH)
+          $checkCpp = [IO.File]::ReadAllText($hooksCpp)
+          $checkF = [IO.File]::ReadAllText($fsrfg)
+          if (-not $checkH.Contains("SetMultiGPUFGAdapterOverride")) { throw "v3 header injection failed" }
+          if (-not $checkCpp.Contains("forcing internal D3D12CreateDevice(nullptr)")) { throw "v3 hook injection failed" }
+          if (-not $checkF.Contains("SetMultiGPUFGAdapterOverride(true)")) { throw "v3 FSRFG scope injection failed" }
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
@@ -111,14 +221,14 @@ jobs:
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-v2-unsigned.zip"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-v3-unsigned.zip"
           Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
           if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-v2-unsigned-zip
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-v2-unsigned.zip
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-v3-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-v3-unsigned.zip
           compression-level: 0
           if-no-files-found: error
