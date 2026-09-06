@@ -88,10 +88,12 @@ if (-not $d.Contains('MultiGPU v7: passthrough D3D12CreateDevice during XeFG int
 if (-not $d.Contains('MultiGPU v8: passthrough D3D12CreateDevice after FG adapter override')) {
     throw 'v8: post-override D3D12 passthrough marker missing'
 }
-if (($x.Split('MultiGPU v8: armed XeFG internal D3D12 adapter override for secondary GPU').Count - 1) -ne 2) {
+$armMarker = 'MultiGPU v8: armed XeFG internal D3D12 adapter override for secondary GPU'
+$disarmMarker = 'MultiGPU v8: disarmed XeFG internal D3D12 adapter override'
+if ([regex]::Matches($x, [regex]::Escape($armMarker)).Count -ne 2) {
     throw 'v8: XeFG arm markers missing'
 }
-if (($x.Split('MultiGPU v8: disarmed XeFG internal D3D12 adapter override').Count - 1) -ne 2) {
+if ([regex]::Matches($x, [regex]::Escape($disarmMarker)).Count -ne 2) {
     throw 'v8: XeFG disarm markers missing'
 }
 if (-not $x.Contains('SetMultiGPUFGAdapterOverride(_multiGpuRuntime->FGDevice())')) {
