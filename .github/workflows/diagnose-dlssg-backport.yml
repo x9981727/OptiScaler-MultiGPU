@@ -38,10 +38,14 @@ jobs:
           $pickCode = $LASTEXITCODE
           $conflicts = @(git -C upstream diff --name-only --diff-filter=U)
           if ($conflicts.Count -gt 0) {
-            Write-Host "Resolving baseline conflicts with official DLSSG side:"
+            Write-Host "Resolving DLSSG baseline conflicts:"
             foreach ($file in $conflicts) {
               Write-Host "  $file"
-              git -C upstream checkout --theirs -- $file
+              if ($file -eq 'OptiScaler/SysUtils.h') {
+                git -C upstream checkout --ours -- $file
+              } else {
+                git -C upstream checkout --theirs -- $file
+              }
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
               git -C upstream add -- $file
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
