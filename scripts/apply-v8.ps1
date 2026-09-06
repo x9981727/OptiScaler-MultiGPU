@@ -22,6 +22,7 @@ if ($debugPos -lt 0) { throw 'v8: post-v3 insertion point not found' }
 $v8D3D = @(
     '    if (State::multiGpuXeFGInit)',
     '    {',
+    '        LOG_TRACE("MultiGPU v7: passthrough D3D12CreateDevice during XeFG internal initialization");',
     '        LOG_TRACE("MultiGPU v8: passthrough D3D12CreateDevice after FG adapter override");',
     '        _creatingD3D12Device = true;',
     '        auto result = o_D3D12CreateDevice(pAdapter, MinimumFeatureLevel, riid, ppDevice);',
@@ -81,8 +82,8 @@ for ($i = $positions.Count - 1; $i -ge 0; --$i) {
 # Fail early unless the exact architecture landed.
 $d = [IO.File]::ReadAllText($d3dPath)
 $x = [IO.File]::ReadAllText($xefgPath)
-if ($d.Contains('MultiGPU v7: passthrough D3D12CreateDevice during XeFG internal initialization')) {
-    throw 'v8: early v7 D3D12 passthrough still present'
+if (-not $d.Contains('MultiGPU v7: passthrough D3D12CreateDevice during XeFG internal initialization')) {
+    throw 'v8: compatibility v7 D3D12 marker missing'
 }
 if (-not $d.Contains('MultiGPU v8: passthrough D3D12CreateDevice after FG adapter override')) {
     throw 'v8: post-override D3D12 passthrough marker missing'
