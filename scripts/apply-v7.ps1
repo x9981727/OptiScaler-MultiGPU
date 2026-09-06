@@ -79,3 +79,8 @@ foreach ($item in $required) {
 }
 
 Write-Host 'v7 XeFG initialization isolation injected successfully.'
+
+# v8 keeps the v7 DXGI isolation but arms the selected FG adapter override and moves
+# the native D3D12 passthrough after the v3 adapter-resolution block.
+& "$env:GITHUB_WORKSPACE\scripts\apply-v8.ps1"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
