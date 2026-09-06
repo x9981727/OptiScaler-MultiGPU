@@ -118,19 +118,8 @@ jobs:
       - name: Apply v7 XeFG initialization isolation hotfix
         shell: powershell
         run: |
-          $patch = Join-Path $env:GITHUB_WORKSPACE "v7\xefg-init-isolation.patch"
-          $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($sha -ne "690e732e4076ed0e119d9fd43dd41623100b0a226f27a9169267f697a47b5e79") {
-            throw "v7 patch SHA256 mismatch: $sha"
-          }
-          git -C upstream apply --check --directory=OptiScaler $patch
+          & "$env:GITHUB_WORKSPACE\scripts\apply-v7.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git -C upstream apply --directory=OptiScaler $patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $xefg = [IO.File]::ReadAllText("$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\xefg\XeFG_Dx12.cpp")
-          $dxgi = [IO.File]::ReadAllText("$env:GITHUB_WORKSPACE\upstream\OptiScaler\hooks\DxgiFactory_Hooks.cpp")
-          if (-not $xefg.Contains('MultiGPU v7: isolating XeFG internal DXGI/D3D12 initialization')) { throw "v7 XeFG marker missing" }
-          if (-not $dxgi.Contains('MultiGPU v7: passthrough XeFG internal CreateSwapChainForHwnd without Opti wrapping')) { throw "v7 DXGI marker missing" }
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
