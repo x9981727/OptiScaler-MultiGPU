@@ -104,7 +104,6 @@ jobs:
           $hooksCpp = Join-Path $env:GITHUB_WORKSPACE "upstream\OptiScaler\hooks\D3D12_Hooks.cpp"
           $fsrfg = Join-Path $env:GITHUB_WORKSPACE "upstream\OptiScaler\framegen\ffx\FSRFG_Dx12.cpp"
 
-          # 1) Public scoped switch used only by FSRFG secondary-context creation.
           $h = [IO.File]::ReadAllText($hooksH)
           if (-not $h.Contains("SetMultiGPUFGAdapterOverride")) {
             $needle = "    static void Hook();"
@@ -113,9 +112,6 @@ jobs:
           }
           [IO.File]::WriteAllText($hooksH, $h, [Text.UTF8Encoding]::new($false))
 
-          # 2) D3D12CreateDevice hook: when armed and AMD asks for nullptr/default adapter,
-          #    replace it with the user-selected MultiGPU FG adapter. ComPtr keeps the adapter
-          #    alive for the complete hooked function including early returns.
           $cpp = [IO.File]::ReadAllText($hooksCpp)
           if (-not $cpp.Contains('#include <framegen/MultiGPU_Dx12.h>')) {
             $includeNeedle = '#include <Config.h>'
@@ -132,15 +128,15 @@ jobs:
           if (-not $cpp.Contains("void D3D12Hooks::SetMultiGPUFGAdapterOverride")) {
             $fnNeedle = 'VALIDATE_HOOK(hkD3D12CreateDevice, D3d12Proxy::PFN_D3D12CreateDevice)'
             if (-not $cpp.Contains($fnNeedle)) { throw "hkD3D12CreateDevice marker not found" }
-            $setter = @'
-void D3D12Hooks::SetMultiGPUFGAdapterOverride(bool enable)
-{
-    _forceMultiGPUFGAdapter = enable;
-    LOG_DEBUG("MultiGPU: scoped internal D3D12 adapter override: {}", enable);
-}
-
-'@
-            $cpp = $cpp.Replace($fnNeedle, $setter + $fnNeedle)
+            $setter = @(
+              'void D3D12Hooks::SetMultiGPUFGAdapterOverride(bool enable)',
+              '{',
+              '    _forceMultiGPUFGAdapter = enable;',
+              '    LOG_DEBUG("MultiGPU: scoped internal D3D12 adapter override: {}", enable);',
+              '}',
+              ''
+            ) -join "`n"
+            $cpp = $cpp.Replace($fnNeedle, $setter + "`n" + $fnNeedle)
           }
 
           if (-not $cpp.Contains("forcing internal D3D12CreateDevice(nullptr)")) {
@@ -150,29 +146,29 @@ void D3D12Hooks::SetMultiGPUFGAdapterOverride(bool enable)
             $logPos = $cpp.IndexOf($logNeedle, $fnPos)
             if ($logPos -lt 0) { throw "hkD3D12CreateDevice log insertion point not found" }
             $insertPos = $logPos + $logNeedle.Length
-            $overrideCode = @'
-
-    Microsoft::WRL::ComPtr<IDXGIAdapter1> forcedMultiGpuAdapter;
-    if (_forceMultiGPUFGAdapter && pAdapter == nullptr)
-    {
-        IDXGIAdapter1* rawAdapter = nullptr;
-        if (MultiGPU::TryGetAdapterByLuid(Config::Instance()->FGAdapterLuid.value_or_default(), &rawAdapter))
-        {
-            forcedMultiGpuAdapter.Attach(rawAdapter);
-            pAdapter = forcedMultiGpuAdapter.Get();
-            LOG_INFO("MultiGPU: forcing internal D3D12CreateDevice(nullptr) to configured FG adapter");
-        }
-        else
-        {
-            LOG_ERROR("MultiGPU: failed to resolve configured FG adapter for internal D3D12CreateDevice");
-        }
-    }
-'@
+            $overrideCode = @(
+              '',
+              '',
+              '    Microsoft::WRL::ComPtr<IDXGIAdapter1> forcedMultiGpuAdapter;',
+              '    if (_forceMultiGPUFGAdapter && pAdapter == nullptr)',
+              '    {',
+              '        IDXGIAdapter1* rawAdapter = nullptr;',
+              '        if (MultiGPU::TryGetAdapterByLuid(Config::Instance()->FGAdapterLuid.value_or_default(), &rawAdapter))',
+              '        {',
+              '            forcedMultiGpuAdapter.Attach(rawAdapter);',
+              '            pAdapter = forcedMultiGpuAdapter.Get();',
+              '            LOG_INFO("MultiGPU: forcing internal D3D12CreateDevice(nullptr) to configured FG adapter");',
+              '        }',
+              '        else',
+              '        {',
+              '            LOG_ERROR("MultiGPU: failed to resolve configured FG adapter for internal D3D12CreateDevice");',
+              '        }',
+              '    }'
+            ) -join "`n"
             $cpp = $cpp.Insert($insertPos, $overrideCode)
           }
           [IO.File]::WriteAllText($hooksCpp, $cpp, [Text.UTF8Encoding]::new($false))
 
-          # 3) Arm the override only while the secondary FidelityFX FG context is created.
           $f = [IO.File]::ReadAllText($fsrfg)
           if (-not $f.Contains('#include <hooks/D3D12_Hooks.h>')) {
             $firstInclude = '#include "FSRFG_Dx12.h"'
@@ -199,7 +195,6 @@ void D3D12Hooks::SetMultiGPUFGAdapterOverride(bool enable)
           }
           [IO.File]::WriteAllText($fsrfg, $f, [Text.UTF8Encoding]::new($false))
 
-          # Validate that all three v3 pieces were actually injected before compiling.
           $checkH = [IO.File]::ReadAllText($hooksH)
           $checkCpp = [IO.File]::ReadAllText($hooksCpp)
           $checkF = [IO.File]::ReadAllText($fsrfg)
