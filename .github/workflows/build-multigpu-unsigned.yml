@@ -1,4 +1,4 @@
-name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v6 (Unsigned)
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v7 (Unsigned)
 
 on:
   push:
@@ -115,6 +115,23 @@ jobs:
           & "$env:GITHUB_WORKSPACE\scripts\apply-v6-xefg.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Apply v7 XeFG initialization isolation hotfix
+        shell: powershell
+        run: |
+          $patch = Join-Path $env:GITHUB_WORKSPACE "v7\xefg-init-isolation.patch"
+          $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne "b3828e3665d2e5d30f7a82ed77e573b0cd61b1de0e1cf57f2aa79d1b15e21c7a") {
+            throw "v7 patch SHA256 mismatch: $sha"
+          }
+          git -C upstream\OptiScaler apply --check $patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C upstream\OptiScaler apply $patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $xefg = [IO.File]::ReadAllText("$env:GITHUB_WORKSPACE\upstream\OptiScaler\framegen\xefg\XeFG_Dx12.cpp")
+          $dxgi = [IO.File]::ReadAllText("$env:GITHUB_WORKSPACE\upstream\OptiScaler\hooks\DxgiFactory_Hooks.cpp")
+          if (-not $xefg.Contains('MultiGPU v7: isolating XeFG internal DXGI/D3D12 initialization')) { throw "v7 XeFG marker missing" }
+          if (-not $dxgi.Contains('MultiGPU v7: passthrough XeFG internal CreateSwapChainForHwnd without Opti wrapping')) { throw "v7 DXGI marker missing" }
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
@@ -124,7 +141,7 @@ jobs:
           msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify v5 and v6 markers are in compiled DLL
+      - name: Verify v5 v6 and v7 markers are in compiled DLL
         shell: powershell
         run: |
           $dll = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a\OptiScaler.dll"
@@ -138,7 +155,10 @@ jobs:
             'MultiGPU v6: XeFG context created on secondary GPU',
             'MultiGPU v6: virtual backbuffer initialization',
             'MultiGPU v6: XeFG proxy swapchain virtualized for the render adapter',
-            'MultiGPU v6: virtual backbuffer {} copied to secondary proxy swapchain'
+            'MultiGPU v6: virtual backbuffer {} copied to secondary proxy swapchain',
+            'MultiGPU v7: isolating XeFG internal DXGI/D3D12 initialization',
+            'MultiGPU v7: passthrough D3D12CreateDevice during XeFG internal initialization',
+            'MultiGPU v7: passthrough XeFG internal CreateSwapChainForHwnd without Opti wrapping'
           )
           foreach ($marker in $markers) {
             if (-not $ascii.Contains($marker)) { throw "Compiled DLL is missing required marker: $marker" }
@@ -151,14 +171,14 @@ jobs:
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v6-unsigned.zip"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v7-unsigned.zip"
           Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
           if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v6-unsigned-zip
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v6-unsigned.zip
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v7-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v7-unsigned.zip
           compression-level: 0
           if-no-files-found: error
