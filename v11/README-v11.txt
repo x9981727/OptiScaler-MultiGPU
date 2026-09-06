@@ -23,7 +23,8 @@ Before SDK resize, the wrapper waits for both render and secondary FG queues.
 Each fence is created from the corresponding queue's device, with checked
 HRESULTs, device-removal handling and a finite timeout. The rare resize wait
 polls at 1 ms to avoid an outstanding event registration after timeout.
-Timeout/error retains existing virtual resources and returns failure.
+Overlay allocators/heaps are also released only after both queues drain.
+Timeout/error retains overlay and virtual resources and returns failure.
 Existing virtual backbuffers remain alive until SDK resize succeeds; a failed
 SDK resize preserves them. Primary device/queue references survive rebuilding.
 Failed rebuilding cannot expose native secondary resources to the renderer.

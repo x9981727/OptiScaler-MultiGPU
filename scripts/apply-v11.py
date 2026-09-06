@@ -84,6 +84,9 @@ def rewrite_resize(s,signature,next_signature,owner):
         resizeFG != nullptr && (_multiGpuVirtualBackbufferRequested ||
                                 Config::Instance()->FGUseMutexForSwapchain.value_or_default())
             ? &resizeFG->Mutex : nullptr, 3);''')
+    # Overlay command allocators and heaps may still be referenced by GPU work.
+    # Keep them alive until both queues have drained, including on timeout/error.
+    p=replace(p,'    MenuOverlayDx::CleanupRenderTarget(true, _handle);\n\n','')
     p=replace(p,'''    WaitForGPUIdle(_device);
 
     const bool recreateMultiGpuVirtualBackbuffers = _multiGpuVirtualBackbufferRequested;
@@ -95,6 +98,8 @@ def rewrite_resize(s,signature,next_signature,owner):
         LOG_ERROR("MultiGPU v11: resize aborted before releasing resources, HRESULT={:X}", (UINT) idleResult);
         return idleResult;
     }
+    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+
     // The SDK owns secondary backbuffers; it does not own our primary textures.
     // Retain those textures until SDK resize succeeds, so failure preserves them.''')
     msg='ResizeBuffers' if owner==1 else 'ResizeBuffers1'
