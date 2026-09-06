@@ -46,6 +46,19 @@ $dxgiPath = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\hooks\DxgiFacto
 $wrappedPath = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\hooks\DxgiFactory_WrappedCalls.cpp'
 $statePath = Join-Path $env:GITHUB_WORKSPACE 'upstream\OptiScaler\State.h'
 
+# IDXGIFactory::CreateSwapChain uses a legacy non-const descriptor pointer. Preserve the
+# caller descriptor and pass a local mutable copy in the v7 passthrough path.
+$wrapped = [IO.File]::ReadAllText($wrappedPath)
+$oldWrappedCall = '        return realFactory->CreateSwapChain(pDevice, pDesc, ppSwapChain);'
+if ($wrapped.Contains($oldWrappedCall)) {
+    $newWrappedCall = @(
+        '        DXGI_SWAP_CHAIN_DESC localDesc = *pDesc;',
+        '        return realFactory->CreateSwapChain(pDevice, &localDesc, ppSwapChain);'
+    ) -join "`n"
+    $wrapped = $wrapped.Replace($oldWrappedCall, $newWrappedCall)
+    [IO.File]::WriteAllText($wrappedPath, $wrapped, [Text.UTF8Encoding]::new($false))
+}
+
 $xefg = [IO.File]::ReadAllText($xefgPath)
 $dxgi = [IO.File]::ReadAllText($dxgiPath)
 $wrapped = [IO.File]::ReadAllText($wrappedPath)
@@ -58,7 +71,8 @@ $required = @(
     @($xefg, 'MultiGPU v7: isolating XeFG internal DXGI/D3D12 initialization'),
     @($d, 'MultiGPU v7: passthrough D3D12CreateDevice during XeFG internal initialization'),
     @($dxgi, 'MultiGPU v7: passthrough XeFG internal CreateSwapChainForHwnd without Opti wrapping'),
-    @($wrapped, 'MultiGPU v7: passthrough wrapped-factory XeFG internal CreateSwapChainForHwnd without Opti wrapping')
+    @($wrapped, 'MultiGPU v7: passthrough wrapped-factory XeFG internal CreateSwapChainForHwnd without Opti wrapping'),
+    @($wrapped, 'DXGI_SWAP_CHAIN_DESC localDesc = *pDesc;')
 )
 foreach ($item in $required) {
     if (-not $item[0].Contains($item[1])) { throw "v7 source marker missing: $($item[1])" }
