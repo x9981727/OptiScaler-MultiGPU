@@ -1,4 +1,4 @@
-name: Build OptiScaler 0.9.4 MultiGPU FSRFG v4 (Unsigned)
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG v5 (Unsigned)
 
 on:
   push:
@@ -97,10 +97,10 @@ jobs:
           $text = $text.Replace("auto computeResult = FFX_API_RETURN_OK;", "ffxReturnCode_t computeResult = FFX_API_RETURN_OK;")
           [IO.File]::WriteAllText($fsrfg, $text, [Text.UTF8Encoding]::new($false))
 
-      - name: Apply v4 secondary FG provider bypass
+      - name: Apply v5 scoped secondary FSR4 isolation
         shell: powershell
         run: |
-          & "$env:GITHUB_WORKSPACE\scripts\apply-v4.ps1"
+          & "$env:GITHUB_WORKSPACE\scripts\apply-v5.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Add MSBuild to PATH
@@ -112,19 +112,36 @@ jobs:
           msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Verify v5 markers are in compiled DLL
+        shell: powershell
+        run: |
+          $dll = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a\OptiScaler.dll"
+          if (-not (Test-Path $dll)) { throw "Compiled OptiScaler.dll not found: $dll" }
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll))
+          $markers = @(
+            'MultiGPU v5: blocking IAmdExtFfxApi while Fsr4Update is temporarily disabled',
+            'MultiGPU v5: temporarily disabling Fsr4Update for secondary FG context',
+            'MultiGPU: scoped internal D3D12 adapter override'
+          )
+          foreach ($marker in $markers) {
+            if (-not $ascii.Contains($marker)) { throw "Compiled DLL is missing required marker: $marker" }
+            Write-Host "Verified marker: $marker"
+          }
+          Write-Host "OptiScaler.dll SHA256: $((Get-FileHash $dll -Algorithm SHA256).Hash)"
+
       - name: Package unsigned ZIP
         shell: powershell
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-v4-unsigned.zip"
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-v5-unsigned.zip"
           Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
           if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-v4-unsigned-zip
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-v4-unsigned.zip
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-v5-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-v5-unsigned.zip
           compression-level: 0
           if-no-files-found: error
