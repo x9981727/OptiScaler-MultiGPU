@@ -1,4 +1,4 @@
-name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v10 (Unsigned)
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v11 (Unsigned)
 
 on:
   push:
@@ -152,13 +152,35 @@ jobs:
           & "$env:GITHUB_WORKSPACE\v9\out\diagnostics-test.exe"
           if ($LASTEXITCODE -ne 0) { throw "Diagnostics test failed: $LASTEXITCODE" }
 
+      - name: Apply v11 resize synchronization fix
+        shell: powershell
+        run: |
+          python scripts/apply-v11.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test nested resize locks and cross-thread exclusion
+        shell: powershell
+        run: |
+          msbuild v11\resize-lock-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v11\out\resize-lock-test.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Resize lock test failed: $LASTEXITCODE" }
+
+      - name: Test D3D12 queue drains on WARP
+        shell: powershell
+        run: |
+          msbuild v11\queue-idle-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v11\out\queue-idle-test.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Queue drain test failed: $LASTEXITCODE" }
+
       - name: Build Release
         shell: powershell
         run: |
           msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify v10 and retained backend markers are in compiled DLL
+      - name: Verify v11 and retained backend markers are in compiled DLL
         shell: powershell
         run: |
           $dll = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a\OptiScaler.dll"
@@ -174,6 +196,12 @@ jobs:
             'MultiGPU v6: XeFG proxy swapchain virtualized for the render adapter',
             'MultiGPU v6: virtual backbuffer {} copied to secondary proxy swapchain',
             'MultiGPU v7: isolating XeFG internal DXGI/D3D12 initialization',
+            'MultiGPU v11: draining render and FG queues before swapchain resize',
+            'MultiGPU v11: both queues idle; entering SDK resize with virtual backbuffers retained',
+            'MultiGPU v11: entered FG resize hook 6677 with thread-scoped lock',
+            'MultiGPU v11: entered FG resize hook 6678 with thread-scoped lock',
+            'MultiGPU v11: ResizeBuffers completed and virtual backbuffers rebuilt',
+            'MultiGPU v11: ResizeBuffers1 completed and virtual backbuffers rebuilt',
             'MultiGPU v10: XeFG adapter bound for swapchain lifetime',
             'MultiGPU v10: XeFG GPU change pending; Save Settings and restart the game',
             'MultiGPU v9: native D3D12 init call',
@@ -196,29 +224,29 @@ jobs:
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          Copy-Item "$env:GITHUB_WORKSPACE\v10\README-v10.txt" $outDir
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v10-unsigned.zip"
+          Copy-Item "$env:GITHUB_WORKSPACE\v11\README-v11.txt" $outDir
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v11-unsigned.zip"
           Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
           if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
 
           $updateDir = Join-Path $env:GITHUB_WORKSPACE 'dxgi-update'
           New-Item -ItemType Directory -Force $updateDir | Out-Null
           Copy-Item "$outDir\OptiScaler.dll" "$updateDir\dxgi.dll"
-          Copy-Item "$env:GITHUB_WORKSPACE\v10\README-update-zhTW.txt" $updateDir
-          Compress-Archive -Path "$updateDir\*" -DestinationPath "$env:GITHUB_WORKSPACE\OptiScaler-MultiGPU-v10-DXGI-update.zip" -CompressionLevel Optimal
+          Copy-Item "$env:GITHUB_WORKSPACE\v11\README-update-zhTW.txt" $updateDir
+          Compress-Archive -Path "$updateDir\*" -DestinationPath "$env:GITHUB_WORKSPACE\OptiScaler-MultiGPU-v11-DXGI-update.zip" -CompressionLevel Optimal
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v10-unsigned-zip
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v10-unsigned.zip
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v11-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v11-unsigned.zip
           compression-level: 0
           if-no-files-found: error
 
       - name: Upload DXGI update ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler-MultiGPU-v10-DXGI-update
-          path: OptiScaler-MultiGPU-v10-DXGI-update.zip
+          name: OptiScaler-MultiGPU-v11-DXGI-update
+          path: OptiScaler-MultiGPU-v11-DXGI-update.zip
           compression-level: 0
           if-no-files-found: error
