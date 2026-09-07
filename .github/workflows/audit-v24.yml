@@ -1,0 +1,46 @@
+name: Audit source for exact-2x XeFG
+on:
+  push:
+    branches: [fix/v24-xefg-exact-2x]
+    paths: [.github/workflows/audit-v24.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Prepare reconstructed source snapshot
+        shell: powershell
+        run: |
+          python -m pip install pyyaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          from pathlib import Path
+          import subprocess, yaml, zipfile
+          root = Path.cwd()
+          workflow = yaml.safe_load((root/'.github/workflows/build-multigpu-unsigned.yml').read_text())
+          prefixes = ('Reconstruct ', 'Clone ', 'Apply ', 'Restore ')
+          for step in workflow['jobs']['build']['steps']:
+              if step.get('name', '').startswith(prefixes) and 'run' in step:
+                  print('RECONSTRUCT:', step['name'], flush=True)
+                  subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference="Stop";\n' + step['run']], check=True)
+          suffixes = {'.cpp','.h','.hpp','.c','.inl','.hlsl','.py','.ps1','.md','.txt','.yml','.yaml','.vcxproj','.props','.def','.patch','.json'}
+          with zipfile.ZipFile('source-review.zip','w',zipfile.ZIP_DEFLATED) as archive:
+              for path in root.rglob('*'):
+                  rel = path.relative_to(root)
+                  if not path.is_file() or '.git' in rel.parts or 'out' in rel.parts:
+                      continue
+                  if path.suffix.lower() in suffixes or '.b64.part' in path.name:
+                      archive.write(path, rel.as_posix())
+          '@ | Set-Content -Encoding UTF8 audit_source.py
+          python audit_source.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-2x-source-review
+          path: source-review.zip
+          retention-days: 7
