@@ -25,8 +25,6 @@ def rep(text, old, new, count=1):
         raise RuntimeError(f'v18 anchor count {actual} != {count}: {old[:120]}')
     return text.replace(old, new)
 
-# Restore upstream-style auto semantics: Input cadence is the default even on
-# secondary async XeFG. Explicit FTInput values remain untouched.
 p = 'framegen/XeFGFrameTime.h'
 s = read(p)
 old = '''    // The optional input-duration hint has not been validated against the
@@ -42,7 +40,6 @@ new = '''    // v18: Input cadence is the stable default used by upstream OptiSc
 s = rep(s, old, new)
 (root / p).write_text(s, encoding='utf-8')
 
-# Add an unmistakable runtime marker so logs prove that the v18 binary is in use.
 p = 'framegen/xefg/XeFG_Dx12.cpp'
 s = read(p)
 anchor = '                LOG_INFO("MultiGPU v17: XeLL latency reduction armed; external sleep pacing bypassed");'
@@ -51,6 +48,4 @@ s = rep(s, anchor, replacement)
 (root / p).write_text(s, encoding='utf-8')
 
 print('v18 applied: secondary async XeFG auto frame-time source restored to Input cadence; explicit overrides preserved')
-
 subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v19.py')], check=True)
-subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v20.py')], check=True)
