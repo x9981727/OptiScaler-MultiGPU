@@ -1,0 +1,39 @@
+name: RDNA4 r5 full Forward development
+on:
+  push:
+    branches: [dlssnr-rdna4-forward-r5]
+    paths: ['rdna4/forward_r5/**', '.github/workflows/rdna4-forward-r5.yml']
+permissions:
+  contents: read
+concurrency:
+  group: rdna4-forward-r5-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect available original Forward assets
+        run: |
+          python - <<'PY'
+          import urllib.request,json,re
+          repo='MatheusGViana/dlss-5-amd-project';rev='04d8b83f26adcbdd489137ea27a3ce59fc75eab4'
+          def get(url):
+              with urllib.request.urlopen(url,timeout=60) as f:return f.read()
+          tree=json.loads(get(f'https://api.github.com/repos/{repo}/git/trees/{rev}?recursive=1'))
+          assert not tree.get('truncated')
+          print('=== RELEVANT ORIGINAL PATHS ===')
+          for e in tree['tree']:
+              p=e['path']
+              if e['type']=='blob' and (p.startswith('analysis/') or any(s in p.lower() for s in ['replay','1080','checkpoint','emulate','plan-','plan_'])):
+                  print(p,e.get('size',0))
+          text=get(f'https://raw.githubusercontent.com/{repo}/{rev}/analysis/inference-decompile.txt').decode()
+          print('=== DECOMPILED FUNCTIONS ===')
+          for i,line in enumerate(text.splitlines(),1):
+              if re.match(r'^FUN_.* @ ',line):print(i,line)
+          print('=== R5 REUSABLE LOCAL SOURCE ===')
+          from pathlib import Path
+          for p in Path('rdna4').rglob('*'):
+              if p.is_file():print(p,p.stat().st_size)
+          PY
