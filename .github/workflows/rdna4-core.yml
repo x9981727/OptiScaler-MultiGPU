@@ -5,23 +5,104 @@ on:
     paths: ['rdna4/**', '.github/workflows/rdna4-core.yml']
 permissions:
   contents: read
+concurrency:
+  group: rdna4-core-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  audit:
+  device:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Install analysis tools
+      - name: Install compiler and audit tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y clang-19 llvm-19 lld-19
           python -m pip install pyelftools==0.32 msgpack==1.1.1
-      - name: Audit pinned runtime
+      - name: Audit pinned original runtime
         run: python rdna4/tools/audit_runtime.py
-      - name: Upload audit
-        if: always()
+      - name: Compile and inspect gfx1201 device code
+        run: python rdna4/tools/build_device.py
+      - name: Upload compiled code and reports
         uses: actions/upload-artifact@v4
         with:
-          name: DLSSNR-RDNA4-Core-Audit
-          path: rdna4/audit/
+          name: RDNA4-device-code
+          path: |
+            rdna4/build/linear_gfx1201.hsaco
+            rdna4/build/linear_gfx1201.isa.txt
+            rdna4/build/compile-report.json
+            rdna4/audit/
+          if-no-files-found: error
           retention-days: 7
+  windows-test-kit:
+    needs: device
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDNA4-device-code
+          path: device
+      - name: Compile standalone Windows x64 test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC x64 toolchain not found' }
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          $lines = @('@echo off', ('call "'+$vcvars+'"'), 'if errorlevel 1 exit /b 1', 'cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\tests\linear_test.cpp /Fe:package\rdna4-test.exe /Fo:package\linear_test.obj', 'exit /b %errorlevel%')
+          $lines | Set-Content build-test.cmd -Encoding ascii
+          & cmd /d /c build-test.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'Windows tester compilation failed' }
+      - name: Execute CPU correctness self-tests
+        shell: pwsh
+        run: |
+          & ./package/rdna4-test.exe --cpu-self-test --output package/ci-cpu-test.json
+          if ($LASTEXITCODE -ne 0) { throw 'CPU tests failed; not packaging' }
+          $result = Get-Content package/ci-cpu-test.json -Raw | ConvertFrom-Json
+          if ($result.status -ne 'cpu_tests_passed_gpu_not_run' -or $result.gpu_attempted) { throw 'Incorrect test status' }
+          Get-Content package/ci-cpu-test.json
+      - name: Assemble experiment kit without proprietary runtime or weights
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path package/reports,package/audit,package/source | Out-Null
+          Copy-Item device/build/linear_gfx1201.hsaco package/
+          Copy-Item device/build/linear_gfx1201.isa.txt,device/build/compile-report.json package/reports/
+          Copy-Item device/audit/* package/audit/
+          Move-Item package/ci-cpu-test.json package/reports/
+          Copy-Item rdna4/README_zh-TW.md,rdna4/TEST_9070XT.cmd package/
+          Copy-Item rdna4/kernels,rdna4/tests,rdna4/tools package/source/ -Recurse
+          Copy-Item .github/workflows/rdna4-core.yml package/source/
+          Remove-Item package/linear_test.obj -ErrorAction SilentlyContinue
+          @{
+            repository='x9981727/OptiScaler-MultiGPU'
+            branch='dlssnr-rdna4-core-r1'
+            commit=$env:GITHUB_SHA
+            run_id=$env:GITHUB_RUN_ID
+            compiled_device_code=$true
+            cpu_self_tests_passed=$true
+            gpu_tested_in_ci=$false
+            full_swin_replacement=$false
+            nr_model_equivalence_tested=$false
+            game_tested=$false
+            performance_improvement_claimed=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root = (Resolve-Path package).Path
+          Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative = $_.FullName.Substring($root.Length+1).Replace('\','/')
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$relative
+          } | Set-Content PACKAGE_SHA256SUMS.txt -Encoding ascii
+          Move-Item PACKAGE_SHA256SUMS.txt package/SHA256SUMS.txt
+          Get-ChildItem package -Recurse -File | Select-Object FullName,Length
+      - name: Upload r1 experimental test kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: DLSSNR-RDNA4-Core-r1-Test
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
