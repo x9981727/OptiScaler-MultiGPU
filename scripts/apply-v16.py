@@ -1,5 +1,7 @@
 """Apply v16 secondary-XeFG no-wait pacing experiment after v15."""
 from pathlib import Path
+import subprocess
+import sys
 
 kit = Path(__file__).resolve().parents[1]
 root = kit / 'upstream' / 'OptiScaler'
@@ -48,8 +50,8 @@ new = '''    auto fg = State::Instance().currentFG;
 s = rep(s, old, new)
 changes[p] = s
 
-# Keep XeLL context/markers/latency reduction intact, but do not advertise low-latency
-# sleep pacing inside the secondary async context. Single-GPU and sync fallback unchanged.
+# v16 removes external CPU pacing from the secondary async path. v17 will
+# immediately restore the SDK-required XeLL latency-reduction armed state.
 p = 'framegen/xefg/XeFG_Dx12.cpp'
 s = read(p)
 s = rep(s, '#include <framegen/XeFGPresentPolicy.h>', '#include <framegen/XeFGPresentPolicy.h>\n#include <framegen/XeFGNoWaitPolicy.h>')
@@ -74,3 +76,5 @@ changes['framegen/XeFGNoWaitPolicy.h'] = (kit / 'v16' / 'XeFGNoWaitPolicy.h').re
 for path, text in changes.items():
     (root / path).write_text(text, encoding='utf-8')
 print('v16 applied: secondary async XeFG pacing bypass with scoped telemetry; sync and single-GPU paths preserved')
+
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v17.py')], check=True)
