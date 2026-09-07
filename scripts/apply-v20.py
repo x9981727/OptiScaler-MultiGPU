@@ -71,3 +71,4 @@ s = rep(s, anchor, replacement)
 
 print('v20 applied: pre-FG render cadence is frozen for the lifetime of active secondary XeFG')
 subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v21.py')], check=True)
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v22.py')], check=True)
