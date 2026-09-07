@@ -11,7 +11,7 @@ out.mkdir(exist_ok=True)
 obj = out / 'linear.o'
 code = out / 'linear_gfx1201.hsaco'
 cmd = ['clang-19', '-x', 'cl', '-cl-std=CL2.0', '--target=amdgcn-amd-amdhsa',
-       '-mcpu=gfx1201', '-mwavefrontsize32', '-mcode-object-version=5', '-nogpulib',
+       '-mcpu=gfx1201', '-mno-wavefrontsize64', '-mcode-object-version=5', '-nogpulib',
        '-O3', '-ffp-contract=off', '-c', str(root/'kernels/linear.cl'), '-o', str(obj)]
 print(' '.join(cmd), flush=True)
 subprocess.run(cmd, check=True)
@@ -42,7 +42,6 @@ for kernel in metadata['amdhsa.kernels']:
     assert kernel['.group_segment_fixed_size'] == 0, 'Unexpected LDS allocation'
     assert kernel.get('.vgpr_spill_count',0) == 0, 'Unexpected VGPR spills'
     assert kernel['.private_segment_fixed_size'] == 0, 'Unexpected scratch allocation'
-    # HIP loads explicit argument offsets from this metadata, hidden args are not supplied by the tester.
     actual = [a['.offset'] for a in kernel['.args'] if not a['.value_kind'].startswith('hidden_')]
     assert actual == [0,8,16,24,32,40,44,48,52,56], actual
     summary = {'name':name,'vgpr':kernel['.vgpr_count'],'lds_bytes':kernel['.group_segment_fixed_size'],
