@@ -8,6 +8,8 @@ default is Input, so v18 restores that default while preserving explicit
 FTInput=1 (Present) and FTInput=2 (Zero) overrides.
 """
 from pathlib import Path
+import subprocess
+import sys
 
 kit = Path(__file__).resolve().parents[1]
 root = kit / 'upstream' / 'OptiScaler'
@@ -49,3 +51,4 @@ s = rep(s, anchor, replacement)
 (root / p).write_text(s, encoding='utf-8')
 
 print('v18 applied: secondary async XeFG auto frame-time source restored to Input cadence; explicit overrides preserved')
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v19.py')], check=True)
