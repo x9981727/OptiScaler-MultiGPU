@@ -1,5 +1,7 @@
 """Fix frame-time setting persistence and scoped secondary XeFG pacing metadata."""
 from pathlib import Path
+import subprocess
+import sys
 kit = Path(__file__).resolve().parents[1]
 root = kit/'upstream/OptiScaler'
 changes = {}
@@ -66,6 +68,10 @@ s = rep(s, anchor, anchor + '''
                      frameTime.SdkMean(), frameTime.InputMean(), frameTime.PresentMean());''')
 changes[p] = s
 changes['framegen/XeFGFrameTime.h'] = (kit/'v15/XeFGFrameTime.h').read_text()
-# Validate all anchors before writing any source file.
-for p, s in changes.items(): (root/p).write_text(s, encoding='utf-8')
+for p, s in changes.items():
+    (root/p).write_text(s, encoding='utf-8')
 print('v15 applied: canonical FTInput reload, legacy compatibility, scoped unknown frame-time pacing and diagnostics')
+
+# v16 branch intentionally chains the next-stage no-wait experiment here so the
+# existing v15 workflow can build the v16 sources when dispatched on this ref.
+subprocess.run([sys.executable, str(kit/'scripts'/'apply-v16.py')], check=True)
