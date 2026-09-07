@@ -1,0 +1,20 @@
+name: Dispatch v17 XeFG Latency Arm Build
+
+on:
+  push:
+    branches: [fix/v17-xefg-latency-arm]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch existing build workflow on this v17 ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run build-multigpu-unsigned.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
