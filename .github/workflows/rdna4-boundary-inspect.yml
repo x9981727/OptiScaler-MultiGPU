@@ -1,0 +1,24 @@
+name: RDNA4 virtual boundary inspection
+on:
+  push:
+    branches: [dlssnr-rdna4-r6-autolab]
+    paths: ['rdna4/autolab/inspect_boundary.py', '.github/workflows/rdna4-boundary-inspect.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y llvm-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - run: python rdna4/autolab/inspect_boundary.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r6-boundary-investigation
+          path: rdna4/autolab/reports/
+          retention-days: 14
+          if-no-files-found: error
