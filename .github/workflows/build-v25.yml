@@ -1,0 +1,115 @@
+name: Build v25 XeFG consumer pacing experiment
+on:
+  push:
+    branches: [fix/v25-xefg-consumer-pacing]
+    paths: ['v25/**', 'scripts/apply-v25.py', '.github/workflows/build-v25.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v25-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Verify reviewed source payload before reconstruction
+        shell: powershell
+        run: |
+          python scripts/apply-v25.py --check-payload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reconstruct v23 and run baseline regression tests
+        shell: powershell
+        run: |
+          python -m pip install pyyaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          from pathlib import Path
+          import subprocess, yaml
+          root = Path.cwd()
+          workflow = yaml.safe_load((root/'.github/workflows/build-multigpu-unsigned.yml').read_text())
+          for step in workflow['jobs']['build']['steps']:
+              if step.get('name') == 'Build Release':
+                  break
+              if 'run' not in step:
+                  continue
+              print('V23 BASELINE:', step['name'], flush=True)
+              subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference="Stop";\n' + step['run']], check=True)
+          '@ | Set-Content -Encoding UTF8 build_v23_base.py
+          python build_v23_base.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Apply v24 COPY transport then reviewed v25 pacing changes
+        shell: powershell
+        run: |
+          python scripts/apply-v24.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/apply-v25.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test production ID policy, marker order, HRESULTs and bounded worker lifecycle
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          msbuild upstream\v25\consumer-pacing-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\upstream\v25\out\consumer-pacing-test.exe" | Tee-Object -FilePath v25\consumer-test-output.txt
+          if ($LASTEXITCODE -ne 0) { throw 'v25 consumer policy regression failed' }
+      - name: Test pre-submission and GPU slot ownership on WARP with D3D12 validation
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          msbuild upstream\v25\deferred-input-warp-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\upstream\v25\out\deferred-input-warp-test.exe" | Tee-Object -FilePath v25\input-test-output.txt
+          if ($LASTEXITCODE -ne 0) { throw 'v25 deferred input WARP regression failed' }
+      - name: Re-test bit-exact v24 COPY handoff with the modified transfer pool
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          msbuild v24\copy-pipeline-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v24\out\copy-pipeline-test.exe" | Tee-Object -FilePath v25\copy-test-output.txt
+          if ($LASTEXITCODE -ne 0) { throw 'v24 COPY regression failed after v25' }
+      - name: Build Windows Release x64
+        shell: powershell
+        run: |
+          msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify and package v25 DLL and auditable source
+        shell: powershell
+        run: |
+          $dll = Join-Path $env:GITHUB_WORKSPACE 'upstream\x64\Release\a\OptiScaler.dll'
+          if (-not (Test-Path $dll)) { throw 'No compiled DLL' }
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll))
+          foreach ($marker in @('MultiGPU v25: consumer-owned XeLL', 'MultiGPU v25 inputs:', 'MultiGPU v25 consumer:', 'MultiGPU v24: dedicated COPY queue ready')) {
+            if (-not $ascii.Contains($marker)) { throw "Missing marker: $marker" }
+          }
+          if ($ascii.Contains('MultiGPU v21 backpressure: dropped busy source frame')) { throw 'Unsafe source shedding returned' }
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'v25-package'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item $dll "$stage\dxgi.dll"
+          Copy-Item v25\README-v25-zhTW.txt $stage
+          Copy-Item v25\*-test-output.txt $stage
+          $hash = (Get-FileHash "$stage\dxgi.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $upstream = git -C upstream rev-parse HEAD
+          @("Build kit commit: $env:GITHUB_SHA", "Upstream commit: $upstream", "Run: $env:GITHUB_RUN_ID", "dxgi.dll SHA256: $hash", 'Target: same-quality source-rate preservation plus even 2x display cadence. Physical AMD results: NOT MEASURED BY CI.', 'Latency scope: FG consumer, NOT game input-to-photon.', 'Tests: v23 baseline regressions, production v25 consumer policy, v25 deferred input ownership WARP, v24 bit-exact COPY WARP after v25.') | Set-Content -Encoding UTF8 "$stage\BUILD-MANIFEST.txt"
+          Get-ChildItem upstream -File | Where-Object { $_.Name -match '^LICENSE|^COPYING' } | ForEach-Object { Copy-Item $_.FullName $stage }
+          Compress-Archive -Path "$stage\*" -DestinationPath OptiScaler-MultiGPU-v25-DXGI-update.zip -CompressionLevel Optimal
+          @("$hash  dxgi.dll", "$((Get-FileHash OptiScaler-MultiGPU-v25-DXGI-update.zip -Algorithm SHA256).Hash.ToLowerInvariant())  OptiScaler-MultiGPU-v25-DXGI-update.zip") | Set-Content -Encoding ASCII OptiScaler-MultiGPU-v25-SHA256.txt
+          $review = Join-Path $env:GITHUB_WORKSPACE 'v25-source-review'
+          New-Item -ItemType Directory -Force $review | Out-Null
+          Copy-Item v25\consumer-pacing.patch, v25\consumer-pacing.patch.gz.b64, scripts\apply-v25.py, v25\README-v25-zhTW.txt, v25\*-test-output.txt $review
+          Copy-Item upstream\v25\*.cpp, upstream\v25\*.vcxproj, upstream\OptiScaler\framegen\XeFGConsumerPolicy.h, upstream\OptiScaler\framegen\XeFGTransferPool.h, upstream\OptiScaler\framegen\xefg\XeFG_Dx12.cpp, upstream\OptiScaler\framegen\xefg\XeFG_Dx12.h $review
+          Copy-Item "$stage\BUILD-MANIFEST.txt" $review
+          Compress-Archive -Path "$review\*" -DestinationPath OptiScaler-MultiGPU-v25-source-review.zip -CompressionLevel Optimal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-MultiGPU-v25-DXGI-update
+          path: |
+            OptiScaler-MultiGPU-v25-DXGI-update.zip
+            OptiScaler-MultiGPU-v25-SHA256.txt
+            OptiScaler-MultiGPU-v25-source-review.zip
+          if-no-files-found: error
+          compression-level: 0
