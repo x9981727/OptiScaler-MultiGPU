@@ -13,6 +13,8 @@ correctness and the known-good v19/v20 behavior while a proper multi-slot FG
 mailbox is developed at the staging layer rather than by faking game Present.
 """
 from pathlib import Path
+import subprocess
+import sys
 
 kit = Path(__file__).resolve().parents[1]
 root = kit / 'upstream' / 'OptiScaler'
@@ -57,3 +59,4 @@ s = rep(s, anchor, marker)
 (root / p).write_text(s, encoding='utf-8')
 
 print('v22 applied: unsafe outer-Present source shedding disabled; exact completion restored')
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v23.py')], check=True)
