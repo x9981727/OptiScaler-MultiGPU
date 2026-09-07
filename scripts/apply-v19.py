@@ -1,16 +1,15 @@
-"""v19: feed XeFG the render-thread gap excluding the previous deferred Present wait.
+"""v19: feed XeFG a render cadence that excludes the previous deferred Present wait.
 
-v18 fixes the zero-frame-time feedback loop, but real-game telemetry still shows
-~50-53 render FPS while the same scene is ~75-82 FPS with XeFG inactive. The
-remaining loop is that FTInput=Input is measured after the v14 deferred Present
-wait, so XeFG is told ~19-20 ms even though the render GPU itself finishes the
-next frame in roughly ~12-13 ms.
+v18 fixes the zero-frame-time feedback loop, but telemetry still shows ~50-53
+render FPS while the same scene is ~75-82 FPS with XeFG inactive. The remaining
+loop is that FTInput=Input is measured after the v14 deferred Present wait, so
+XeFG is told ~19-20 ms even though the render path was already running faster.
 
-v19 measures the time from the previous outer Present return to the next outer
-Present entry. That interval excludes the previous XeFG Present wait and is a
-closer approximation of the render GPU's unblocked frame cadence. Secondary
-async XeFG uses this value only for Auto/Input frame-time pacing; explicit
-Present/Zero modes are preserved.
+v19 learns a baseline from the time between the previous outer Present return and
+the next outer Present entry while XeFG is inactive. Once XeFG is active, that
+baseline is frozen against artificial downward collapse caused by deferred
+Present blocking; it may only adapt slowly upward if the render workload becomes
+heavier. Secondary async XeFG uses this value for Auto/Input pacing only.
 """
 from pathlib import Path
 
@@ -28,7 +27,6 @@ def rep(text, old, new, count=1):
         raise RuntimeError(f'v19 anchor count {actual} != {count}: {old[:140]}')
     return text.replace(old, new)
 
-# Expose a tiny render-gap telemetry hook without changing other FG backends.
 p = 'framegen/IFGFeature_Dx12.h'
 s = read(p)
 s = rep(s,
@@ -36,7 +34,6 @@ s = rep(s,
         '    virtual void CaptureSDKPresentStatus() {}\n    virtual void RecordMultiGPURenderGap(double) {}')
 (root / p).write_text(s, encoding='utf-8')
 
-# Store a smoothed unblocked render interval in XeFG.
 p = 'framegen/xefg/XeFG_Dx12.h'
 s = read(p)
 s = rep(s,
@@ -47,7 +44,6 @@ s = rep(s,
         '    void CaptureSDKPresentStatus() override final;\n    void RecordMultiGPURenderGap(double ms) override final;')
 (root / p).write_text(s, encoding='utf-8')
 
-# Keep a per-swapchain timestamp so Present1/Present share the same cadence.
 p = 'wrapped/wrapped_swapchain.h'
 s = read(p)
 s = rep(s,
@@ -55,8 +51,6 @@ s = rep(s,
         '    int _lastAsyncEligibility = -1;\n    double _lastOuterPresentReturnMs = 0.0;')
 (root / p).write_text(s, encoding='utf-8')
 
-# Measure time spent rendering after the previous outer Present returned, before
-# v14 waits for the previous secondary XeFG Present. RAII stamps every return.
 p = 'wrapped/wrapped_swapchain.cpp'
 s = read(p)
 anchor = '''    // Previous SDK Present must finish before destination-buffer access, SDK
@@ -86,16 +80,24 @@ s = rep(s,
         '#include <framegen/XeFGLatencyPolicy.h>',
         '#include <framegen/XeFGLatencyPolicy.h>\n#include <algorithm>\n#include <cmath>')
 
-# Smooth short-term jitter while rejecting loading/menu stalls. The value is
-# collected even while XeFG is inactive, so activation starts with a baseline.
 method_anchor = 'bool XeFG_Dx12::QueueXeFGPresent(std::function<HRESULT()> call)'
 method = '''void XeFG_Dx12::RecordMultiGPURenderGap(double ms)
 {
     if (!std::isfinite(ms) || ms < 1.0 || ms > 50.0)
         return;
     const double previous = _unblockedRenderGapMs.load(std::memory_order_relaxed);
-    const double smoothed = previous > 0.0 ? previous * 0.80 + ms * 0.20 : ms;
-    _unblockedRenderGapMs.store(smoothed, std::memory_order_relaxed);
+    if (previous <= 0.0 || !IsActive())
+    {
+        const double smoothed = previous > 0.0 ? previous * 0.80 + ms * 0.20 : ms;
+        _unblockedRenderGapMs.store(smoothed, std::memory_order_relaxed);
+        return;
+    }
+    // While FG is active, a much smaller gap is usually the symptom of the
+    // previous Present consuming the rest of the frame. Never train the pacing
+    // baseline downward from that feedback. A genuinely heavier render path can
+    // still raise the baseline slowly.
+    if (ms > previous * 1.10)
+        _unblockedRenderGapMs.store(previous * 0.90 + ms * 0.10, std::memory_order_relaxed);
 }
 
 '''
@@ -114,8 +116,6 @@ new = '''    const bool secondaryAsyncFrame = IsMultiGPUActive() && MultiGPU::Xe
     if (secondaryAsyncFrame && inputMode && std::isfinite(unblockedRenderGap) && unblockedRenderGap >= 1.0)
     {
         const float gapMs = static_cast<float>(unblockedRenderGap);
-        // Never lengthen the SDK hint. We only remove time that was added by the
-        // previous deferred XeFG Present wait.
         if (!(frameTime.sdkMs > 0.0f) || gapMs < frameTime.sdkMs)
             frameTime.sdkMs = gapMs;
     }
@@ -130,4 +130,4 @@ log_insert = '''            LOG_INFO("MultiGPU v19 frameTime: unblockedRenderGap
 s = rep(s, log_anchor, log_insert)
 (root / p).write_text(s, encoding='utf-8')
 
-print('v19 applied: secondary XeFG Input pacing now uses render gap excluding previous deferred Present wait')
+print('v19 applied: secondary XeFG Input pacing uses a pre-block render cadence baseline')
