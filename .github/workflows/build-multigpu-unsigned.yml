@@ -1,8 +1,8 @@
-name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v13 Timing Diagnostics (Unsigned)
+name: Build OptiScaler 0.9.4 MultiGPU FSRFG + XeFG v14 Present Overlap (Unsigned)
 
 on:
   push:
-    branches: [diagnostics/v13-xefg-offload]
+    branches: [fix/v14-xefg-present-overlap]
   workflow_dispatch:
 
 permissions:
@@ -212,13 +212,37 @@ jobs:
           & "$env:GITHUB_WORKSPACE\v13\out\timing-probe-test.exe"
           if ($LASTEXITCODE -ne 0) { throw "Timing probe test failed: $LASTEXITCODE" }
 
+      - name: Apply v14 bounded secondary XeFG Present handoff
+        shell: powershell
+        run: |
+          python scripts/apply-v14.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test deferred Present ownership and virtual buffer indices
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          msbuild v14\deferred-present-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v14\out\deferred-present-test.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Deferred Present test failed: $LASTEXITCODE" }
+
+      - name: Test WARP next-frame render and pending FG data ownership
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          msbuild v14\deferred-present-warp-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v14\out\deferred-present-warp-test.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Deferred Present WARP test failed: $LASTEXITCODE" }
+
       - name: Build Release
         shell: powershell
         run: |
           msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify v13 and retained backend markers are in compiled DLL
+      - name: Verify v14 and retained backend markers are in compiled DLL
         shell: powershell
         run: |
           $dll = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a\OptiScaler.dll"
@@ -240,6 +264,8 @@ jobs:
             'MultiGPU v12 XeFG perf: renderFPS=',
             'MultiGPU v13 timing: active=',
             'MultiGPU v13 topology: renderLuid=',
+            'MultiGPU v14 policy: eligible=',
+            'MultiGPU v14 present: asyncSetting=',
             'MultiGPU v11: draining render and FG queues before swapchain resize',
             'MultiGPU v11: both queues idle; entering SDK resize with virtual backbuffers retained',
             'MultiGPU v11: entered FG resize hook 6677 with thread-scoped lock',
@@ -268,29 +294,29 @@ jobs:
         run: |
           $outDir = Join-Path $env:GITHUB_WORKSPACE "upstream\x64\Release\a"
           if (-not (Test-Path $outDir)) { throw "Release output folder not found: $outDir" }
-          Copy-Item "$env:GITHUB_WORKSPACE\v13\README-v13.txt" $outDir
-          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v13-diagnostics-unsigned.zip"
+          Copy-Item "$env:GITHUB_WORKSPACE\v14\README-v14.txt" $outDir
+          $archive = Join-Path $env:GITHUB_WORKSPACE "OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v14-overlap-unsigned.zip"
           Compress-Archive -Path "$outDir\*" -DestinationPath $archive -CompressionLevel Optimal
           if (-not (Test-Path $archive)) { throw "ZIP archive was not created" }
 
           $updateDir = Join-Path $env:GITHUB_WORKSPACE 'dxgi-update'
           New-Item -ItemType Directory -Force $updateDir | Out-Null
           Copy-Item "$outDir\OptiScaler.dll" "$updateDir\dxgi.dll"
-          Copy-Item "$env:GITHUB_WORKSPACE\v13\README-update-zhTW.txt" $updateDir
-          Compress-Archive -Path "$updateDir\*" -DestinationPath "$env:GITHUB_WORKSPACE\OptiScaler-MultiGPU-v13-DXGI-update.zip" -CompressionLevel Optimal
+          Copy-Item "$env:GITHUB_WORKSPACE\v14\README-update-zhTW.txt" $updateDir
+          Compress-Archive -Path "$updateDir\*" -DestinationPath "$env:GITHUB_WORKSPACE\OptiScaler-MultiGPU-v14-DXGI-update.zip" -CompressionLevel Optimal
 
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v13-diagnostics-unsigned-zip
-          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v13-diagnostics-unsigned.zip
+          name: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v14-overlap-unsigned-zip
+          path: OptiScaler_0.9.4-MultiGPU-FSRFG-XeFG-v14-overlap-unsigned.zip
           compression-level: 0
           if-no-files-found: error
 
       - name: Upload DXGI update ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler-MultiGPU-v13-DXGI-update
-          path: OptiScaler-MultiGPU-v13-DXGI-update.zip
+          name: OptiScaler-MultiGPU-v14-DXGI-update
+          path: OptiScaler-MultiGPU-v14-DXGI-update.zip
           compression-level: 0
           if-no-files-found: error
