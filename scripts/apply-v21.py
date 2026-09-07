@@ -6,11 +6,12 @@ worker is busy. The 6600 XT XeFG GPU span is only ~10-11 ms, so the remaining
 loss is presentation backpressure rather than pure XeFG compute saturation.
 
 For immediate, ordinary async presents only, v21 polls the previous worker
-without blocking. If it is still busy, the current virtual source frame is
-intentionally dropped and the render-side cursor advances. This is mailbox-like
-backpressure: preserve native render cadence and skip a small number of FG source
-frames instead of stalling the 9070 XT. VSync, TEST, DO_NOT_SEQUENCE, partial,
-fullscreen and synchronous fallback paths retain the old blocking semantics.
+without blocking. If it is still busy, one source frame may be intentionally
+dropped and the render-side cursor advances. If the worker is still busy on the
+following source, v21 falls back to the old bounded wait. This mailbox-like
+backpressure protects native render cadence without allowing source continuity
+to collapse under severe secondary-GPU overload. VSync, TEST, DO_NOT_SEQUENCE,
+partial, fullscreen and synchronous fallback paths retain old semantics.
 """
 from pathlib import Path
 
@@ -28,7 +29,6 @@ def rep(text, old, new, count=1):
         raise RuntimeError(f'v21 anchor count {actual} != {count}: {old[:160]}')
     return text.replace(old, new)
 
-# Nonblocking completion probe on the FG abstraction.
 p = 'framegen/IFGFeature_Dx12.h'
 s = read(p)
 s = rep(s,
@@ -80,9 +80,7 @@ try_method = '''HRESULT XeFG_Dx12::TryFinishXeFGPresent(bool consumeStatus, bool
                 LOG_WARN("MultiGPU v21: deferred SDK Present returned {:X}", static_cast<UINT>(presentResult));
             }
             else
-            {
                 CaptureSDKPresentStatus();
-            }
         }
         else if (_deferredPresent->Pending())
         {
@@ -99,7 +97,6 @@ try_method = '''HRESULT XeFG_Dx12::TryFinishXeFGPresent(bool consumeStatus, bool
 s = rep(s, finish_anchor, try_method + finish_anchor)
 (root / p).write_text(s, encoding='utf-8')
 
-# Add the mailbox/backpressure policy and counters to the virtual swapchain.
 p = 'wrapped/wrapped_swapchain.h'
 s = read(p)
 s = rep(s,
@@ -112,7 +109,8 @@ s = rep(s,
     HRESULT TryFinishMultiGPUQueuedPresent(bool consumeStatus, bool* pending);
     bool AllowMultiGPUQueuedPresent(UINT interval, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters);
     UINT64 _multiGpuBackpressureAttempts = 0;
-    UINT64 _multiGpuDroppedSourceFrames = 0;''')
+    UINT64 _multiGpuDroppedSourceFrames = 0;
+    UINT _multiGpuConsecutiveDroppedSourceFrames = 0;''')
 (root / p).write_text(s, encoding='utf-8')
 
 p = 'wrapped/wrapped_swapchain.cpp'
@@ -133,7 +131,6 @@ HRESULT WrappedIDXGISwapChain4::TryFinishMultiGPUQueuedPresent(bool consumeStatu
 '''
 s = rep(s, finish, finish_plus_try)
 
-# Replace the mandatory previous-Present wait in both Present and Present1.
 for begin, end in [
     ('HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(', 'HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetBuffer('),
     ('HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(', 'BOOL STDMETHODCALLTYPE WrappedIDXGISwapChain4::IsTemporaryMonoSupported('),
@@ -152,14 +149,20 @@ for begin, end in [
     HRESULT previousPresent = TryFinishMultiGPUQueuedPresent(true, &v21PreviousPending);
     if (previousPresent != S_OK) return previousPresent;
 
-    if (MultiGPU::CanDropBusyXeFGSource(v21AsyncEligible, SyncInterval, Flags, v21PreviousPending))
+    if (!v21PreviousPending)
+        _multiGpuConsecutiveDroppedSourceFrames = 0;
+
+    if (MultiGPU::CanDropBusyXeFGSource(v21AsyncEligible, SyncInterval, Flags,
+                                        v21PreviousPending, _multiGpuConsecutiveDroppedSourceFrames))
     {{
         ++_multiGpuDroppedSourceFrames;
+        ++_multiGpuConsecutiveDroppedSourceFrames;
         _multiGpuCursor.Advance(true, Flags);
         if (_multiGpuDroppedSourceFrames <= 3 || (_multiGpuDroppedSourceFrames % 30) == 0)
-            LOG_INFO("MultiGPU v21 backpressure: dropped busy source frame; attempts={{}}, dropped={{}}, accepted={{}}",
+            LOG_INFO("MultiGPU v21 backpressure: dropped busy source frame; attempts={{}}, dropped={{}}, accepted={{}}, consecutive={{}}",
                      _multiGpuBackpressureAttempts, _multiGpuDroppedSourceFrames,
-                     _multiGpuBackpressureAttempts - _multiGpuDroppedSourceFrames);
+                     _multiGpuBackpressureAttempts - _multiGpuDroppedSourceFrames,
+                     _multiGpuConsecutiveDroppedSourceFrames);
         return S_OK;
     }}
 
@@ -167,6 +170,7 @@ for begin, end in [
     {{
         previousPresent = FinishMultiGPUQueuedPresent(true);
         if (previousPresent != S_OK) return previousPresent;
+        _multiGpuConsecutiveDroppedSourceFrames = 0;
     }}
     HRESULT result;'''
     if part.count(old) != 1:
@@ -178,4 +182,4 @@ for begin, end in [
 (root / 'framegen/XeFGBackpressurePolicy.h').write_text(
     (kit / 'v21' / 'XeFGBackpressurePolicy.h').read_text(encoding='utf-8'), encoding='utf-8')
 
-print('v21 applied: immediate secondary XeFG uses mailbox-style busy-source shedding instead of render-thread blocking')
+print('v21 applied: immediate secondary XeFG sheds at most one busy source frame before bounded fallback wait')
