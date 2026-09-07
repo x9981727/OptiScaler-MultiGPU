@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "kind": "completed_virtual_validation_not_hardware_acceptance",
+  "tested_commit": "5e2ae1b87ab1b9638d9c41f8ffbec5c8b9f71940",
+  "workflow_run": 34160161403,
+  "workflow_job": 101860060360,
+  "workflow_conclusion": "success",
+  "runner_label": "windows-2022",
+  "artifact_id": 10032423506,
+  "artifact_sha256": "35e589a4f818ab4fd5419a6e27350d4ac7a54efdf372ec1fb053db597cf27261",
+  "candidate_dll_compiled": true,
+  "candidate_dll_sha256": "3bd8e692c6acb6fa340b2f95bfccd33ae9d4a8b65dfba9ac93e714ad56f48692",
+  "candidate_game_dll_published": false,
+  "protocol": {
+    "actual_production_helpers": true,
+    "mock_sdk_callbacks": true,
+    "events": 1048576,
+    "complete_packets": 629655,
+    "incomplete_packets": 418921,
+    "deterministic_seeds": 32,
+    "scope_cases": 16,
+    "sequence_bug_reproduced_before_fix": true,
+    "missing_packet_sequence_regression_passed_after_fix": true,
+    "arbitrary_real_Intel_API_failure_recovery_validated": false
+  },
+  "warp_transfer": {
+    "production_copy_helpers_and_pools": true,
+    "frames": 84,
+    "cases": 6,
+    "slots": 3,
+    "queues": 4,
+    "pixel_words_checked": 343325352,
+    "max_resolution": "3840x2160",
+    "render_size_depth_and_motion_vectors_tested": "2953x1661",
+    "r10g10b10a2_and_r16g16b16a16_raw_format_copies": true,
+    "bit_exact": true,
+    "d3d12_error_or_corruption_messages": 0,
+    "physical_cross_adapter_PCIe_test": false,
+    "XeFG_interpolated_image_test": false
+  },
+  "timing_parser_control_tests": {"passed": 9, "synthetic_controls_are_hardware_evidence": false},
+  "actual_sdk_probe": {
+    "process_returncode": 0,
+    "observed_adapter_names": ["Microsoft Basic Render Driver", "Microsoft Basic Render Driver"],
+    "target_9070XT_6600XT_pair_available": false,
+    "warp_d3d12_device_hresult": 0,
+    "xefgSwapChainD3D12CreateContext_result": -1,
+    "xefg_result_name": "XEFG_SWAPCHAIN_RESULT_ERROR_UNSUPPORTED_DEVICE",
+    "interpolation_execution_reached": false,
+    "actual_XeLL_context_initialization_reached": false
+  },
+  "final_release_allowed": false,
+  "remaining_blockers": [
+    "same-scene matched FG-off/on source performance on target hardware",
+    "genuine balanced 2x display cadence on the compiled candidate",
+    "actual frame pixels, flicker and ghosting",
+    "end-to-end input latency and bounded resource/queue behaviour",
+    "target GPU load and driver-specific behaviour"
+  ],
+  "interpretation": "CI success means the specified protocol/transfer/parser checks and source compilation passed. The proprietary XeFG context rejected WARP. No claim is made that persistent v25 flicker, source-FPS regression or smooth 67-to-134 output is solved."
+}
