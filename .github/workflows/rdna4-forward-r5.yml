@@ -9,31 +9,116 @@ concurrency:
   group: rdna4-forward-r5-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  inspect:
+  device-support:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect available original Forward assets
+      - name: Install compiler and inspection libraries
         run: |
-          python - <<'PY'
-          import urllib.request,json,re
-          repo='MatheusGViana/dlss-5-amd-project';rev='04d8b83f26adcbdd489137ea27a3ce59fc75eab4'
-          def get(url):
-              with urllib.request.urlopen(url,timeout=60) as f:return f.read()
-          tree=json.loads(get(f'https://api.github.com/repos/{repo}/git/trees/{rev}?recursive=1'))
-          assert not tree.get('truncated')
-          print('=== RELEVANT ORIGINAL PATHS ===')
-          for e in tree['tree']:
-              p=e['path']
-              if e['type']=='blob' and (p.startswith('analysis/') or any(s in p.lower() for s in ['replay','1080','checkpoint','emulate','plan-','plan_'])):
-                  print(p,e.get('size',0))
-          text=get(f'https://raw.githubusercontent.com/{repo}/{rev}/analysis/inference-decompile.txt').decode()
-          print('=== DECOMPILED FUNCTIONS ===')
-          for i,line in enumerate(text.splitlines(),1):
-              if re.match(r'^FUN_.* @ ',line):print(i,line)
-          print('=== R5 REUSABLE LOCAL SOURCE ===')
-          from pathlib import Path
-          for p in Path('rdna4').rglob('*'):
-              if p.is_file():print(p,p.stat().st_size)
-          PY
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Rebuild unchanged r4 Head source and run its CPU gates
+        run: python rdna4/layer_r4/build_layer.py
+      - name: Build bounded checkpoint loader and execute support self-tests
+        run: python rdna4/forward_r5/build_support.py
+      - name: Upload code and verified build dependencies
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r5-build-inputs
+          path: |
+            rdna4/layer_r4/build/head_r4_gfx1201.hsaco
+            rdna4/layer_r4/build/head_r4.isa.txt
+            rdna4/layer_r4/build/compile-report.json
+            rdna4/layer_r4/candidate_hash.hpp
+            rdna4/forward_r5/deps/
+            rdna4/forward_r5/build/support-build-report.json
+            rdna4/forward_r5/build/fixture-*.zip
+          if-no-files-found: error
+          retention-days: 7
+  windows:
+    needs: device-support
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDNA4-r5-build-inputs
+          path: device
+      - name: Compile Windows x64 full-plan runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item device/layer_r4/candidate_hash.hpp rdna4/layer_r4/
+          Copy-Item device/forward_r5/deps rdna4/forward_r5/ -Recurse
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC x64 not found' }
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          @('@echo off',('call "'+$vcvars+'"'),'if errorlevel 1 exit /b 1',
+            'cl /nologo /O2 /MT /c /TC rdna4\forward_r5\deps\puff.c /Fo:package\puff.obj',
+            'if errorlevel 1 exit /b 1',
+            'cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\forward_r5\forward_diff.cpp package\puff.obj /Fe:package\rdna4-r5-test.exe /Fo:package\forward_diff.obj',
+            'exit /b %errorlevel%') | Set-Content build-r5.cmd -Encoding ascii
+          & cmd /d /c build-r5.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'Full-plan runner compilation failed' }
+      - name: Run Windows CPU and ZIP fixture tests
+        shell: pwsh
+        run: |
+          & ./package/rdna4-r5-test.exe --cpu-self-test --fixture device/forward_r5/build/fixture-deflated.zip --output package/ci-cpu-test.json
+          if ($LASTEXITCODE -ne 0) { throw 'Windows CPU/ZIP tests failed' }
+          $r = Get-Content package/ci-cpu-test.json -Raw | ConvertFrom-Json
+          if ($r.status -ne 'cpu_tests_passed_original_plan_and_gpu_not_tested' -or $r.gpu_attempted -or !$r.cpu_zip_fixture_passed) { throw 'Invalid CI test status' }
+          Get-Content package/ci-cpu-test.json
+      - name: Assemble full-plan test kit without original runtime, model or source checkpoint
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path package/reports,package/source/forward_r5,package/source/layer_r4,package/source/tests,package/Licenses | Out-Null
+          Copy-Item device/layer_r4/build/head_r4_gfx1201.hsaco package/
+          Copy-Item device/layer_r4/build/compile-report.json,device/layer_r4/build/head_r4.isa.txt,device/forward_r5/build/support-build-report.json package/reports/
+          Move-Item package/ci-cpu-test.json package/reports/
+          Copy-Item rdna4/forward_r5/README_zh-TW.md,rdna4/forward_r5/TEST_R5.cmd package/
+          Copy-Item rdna4/layer_r4/LICENSE.txt package/Licenses/INDEPENDENT_SOURCE_MIT.txt
+          Copy-Item rdna4/forward_r5/deps/JSON_LICENSE.MIT package/Licenses/
+          Copy-Item rdna4/forward_r5/deps/puff.h package/Licenses/PUFF_LICENSE_AND_HEADER.txt
+          Copy-Item rdna4/forward_r5/*.cpp,rdna4/forward_r5/*.hpp,rdna4/forward_r5/*.py package/source/forward_r5/
+          Copy-Item rdna4/forward_r5/deps package/source/forward_r5/ -Recurse
+          Copy-Item rdna4/layer_r4/head_direct.cl,rdna4/layer_r4/head_contract.hpp,rdna4/layer_r4/candidate_hash.hpp,rdna4/layer_r4/build_layer.py package/source/layer_r4/
+          Copy-Item rdna4/tests/linear_test.cpp package/source/tests/
+          Copy-Item .github/workflows/rdna4-forward-r5.yml package/source/
+          Remove-Item package/*.obj -ErrorAction SilentlyContinue
+          @{
+            repository='x9981727/OptiScaler-MultiGPU'
+            branch='dlssnr-rdna4-forward-r5'
+            commit=$env:GITHUB_SHA
+            run_id=$env:GITHUB_RUN_ID
+            compiled_windows_exe=$true
+            cpu_fixture_tests_passed=$true
+            native_zip_input_supported=$true
+            original_checkpoint_required_from_user=$true
+            original_checkpoint_included=$false
+            original_plan_read_in_ci=$false
+            gpu_executed_in_ci=$false
+            original_full_forward_executed_in_ci=$false
+            game_tested=$false
+            game_deployment_approved=$false
+            performance_improvement_claimed=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root = (Resolve-Path package).Path
+          Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative=$_.FullName.Substring($root.Length+1).Replace('\','/')
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$relative
+          } | Set-Content PACKAGE_SHA256SUMS.txt -Encoding ascii
+          Move-Item PACKAGE_SHA256SUMS.txt package/SHA256SUMS.txt
+      - name: Upload r5 full-plan differential runner
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r5-Full-Plan-Diff
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
