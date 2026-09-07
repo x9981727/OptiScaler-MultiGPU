@@ -3,7 +3,8 @@
 The compressed base diff is verified and applied to reconstructed v23. The
 readable follow-up below fixes the COPY layout violation caught by our first
 WARP run. COPY textures stay in COMMON using implicit promotion/decay; explicit
-DIRECT resource barriers are retained. No quality, frame-time or dropping edits.
+DIRECT resource barriers are retained. Exact deferred HRESULTs survive the
+transfer boundary. No quality, frame-time or source-dropping edits.
 """
 from pathlib import Path
 import base64
@@ -82,6 +83,34 @@ new = '''    if (fgCmdList->GetType() == D3D12_COMMAND_LIST_TYPE_COPY)
 runtime = replace_once(runtime, old, new)
 runtime_path.write_text(runtime, encoding='utf-8')
 
+# An occluded/mode-changed deferred Present is not a removed GPU. v23's bool
+# transfer boundary could collapse a legitimate SDK status into DEVICE_REMOVED.
+header_path = root / 'wrapped/wrapped_swapchain.h'
+header = header_path.read_text(encoding='utf-8-sig')
+header = replace_once(header, 'bool TransferMultiGPUVirtualBackbuffer(bool overlapEligible);',
+                      'HRESULT TransferMultiGPUVirtualBackbuffer(bool overlapEligible);')
+header_path.write_text(header, encoding='utf-8')
+wrapper_path = root / 'wrapped/wrapped_swapchain.cpp'
+wrapper = wrapper_path.read_text(encoding='utf-8-sig')
+start = wrapper.index('bool WrappedIDXGISwapChain4::TransferMultiGPUVirtualBackbuffer(bool overlapEligible)')
+end = wrapper.index('//\nHRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::QueryInterface', start)
+body = wrapper[start:end]
+body = replace_once(body, 'bool WrappedIDXGISwapChain4::TransferMultiGPUVirtualBackbuffer(',
+                    'HRESULT WrappedIDXGISwapChain4::TransferMultiGPUVirtualBackbuffer(')
+body = replace_once(body, '        return false;\n    }\n    // v23 sampled',
+                    '        return previous;\n    }\n    // v23 sampled')
+body = body.replace('return false;', 'return DXGI_ERROR_DEVICE_REMOVED;').replace('return true;', 'return S_OK;')
+wrapper = wrapper[:start] + body + wrapper[end:]
+old = '''            if (!TransferMultiGPUVirtualBackbuffer(v23OverlapEligible))
+                return DXGI_ERROR_DEVICE_REMOVED;'''
+new = '''            const HRESULT transferResult = TransferMultiGPUVirtualBackbuffer(v23OverlapEligible);
+            if (transferResult != S_OK)
+                return transferResult;'''
+if wrapper.count(old) != 2:
+    raise RuntimeError('v24 exact transfer HRESULT call-site mismatch')
+wrapper = wrapper.replace(old, new)
+wrapper_path.write_text(wrapper, encoding='utf-8')
+
 # Exercise the exact production helper, rather than keeping a separate test-only
 # copy implementation. Do not weaken or disable D3D12 error validation.
 test_path = kit / 'v24/copy-pipeline-test.cpp'
@@ -98,4 +127,4 @@ test = replace_once(test, 'd.Height=d.DepthOrArraySize=d.MipLevels=d.SampleDesc.
 test = replace_once(test, 'desc.Width=width;desc.Height=height;desc.DepthOrArraySize=desc.MipLevels=desc.SampleDesc.Count=1;',
                     'desc.Width=width;desc.Height=height;desc.DepthOrArraySize=1;desc.MipLevels=1;desc.SampleDesc.Count=1;')
 test_path.write_text(test, encoding='utf-8')
-print('v24 applied: dedicated COPY prefetch with COMMON layout + exact destination lookup; source shedding disabled')
+print('v24 applied: COMMON-layout COPY prefetch + exact destination/HRESULT handoff; source shedding disabled')
