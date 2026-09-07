@@ -1,0 +1,60 @@
+name: Build DLSS 5 AMD package
+
+on:
+  push:
+    branches:
+      - build-dlss5amd-20260907
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source with Git LFS
+        uses: actions/checkout@v4
+        with:
+          repository: MatheusGViana/dlss-5-amd-project
+          ref: main
+          lfs: true
+          path: src
+
+      - name: Pull LFS objects
+        shell: pwsh
+        run: git -C src lfs pull
+
+      - name: Verify package inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = 'src/OptiScaler-AMD-PreSR-Multipass-v1.2'
+          if (!(Test-Path "$stage/OptiScaler.dll")) { throw 'Missing OptiScaler.dll' }
+          if (!(Test-Path "$stage/dlssnr_amd_pass1.dll")) { throw 'Missing pass1 DLL' }
+          if (!(Test-Path "$stage/dlssnr_on_amd_weights.bin")) { throw 'Missing weights' }
+          $weights = (Get-FileHash "$stage/dlssnr_on_amd_weights.bin" -Algorithm SHA256).Hash
+          if ($weights -ne '6BF8DC931EF3CCFFE18C82DE26AB374156E7F19539FFCF8EABAA25DCA5CF15AB') {
+            throw "Unexpected weights SHA256: $weights"
+          }
+          Get-ChildItem $stage -Recurse -File | Select-Object FullName,Length
+
+      - name: Create complete ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = 'src/OptiScaler-AMD-PreSR-Multipass-v1.2'
+          $zip = 'OptiScaler-AMD-PreSR-Multipass-v1.2-Full.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          "$hash *$zip" | Set-Content -Encoding ascii 'PACKAGE_SHA256.txt'
+          Get-Item $zip | Format-List Name,Length
+          Get-Content 'PACKAGE_SHA256.txt'
+
+      - name: Upload complete package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-AMD-PreSR-Multipass-v1.2-Full
+          path: |
+            OptiScaler-AMD-PreSR-Multipass-v1.2-Full.zip
+            PACKAGE_SHA256.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
