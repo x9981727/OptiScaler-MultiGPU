@@ -1,0 +1,67 @@
+name: Package exact-2x display capture helper
+on:
+  push:
+    branches: [fix/v24-xefg-exact-2x]
+    paths: [.github/workflows/capture-kit-v24.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  capture-kit:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify official portable PresentMon
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force capture-kit | Out-Null
+          Invoke-WebRequest -UseBasicParsing 'https://github.com/GameTechDev/PresentMon/releases/download/v2.5.1/PresentMon-2.5.1-x64.exe' -OutFile 'capture-kit/PresentMon-2.5.1-x64.exe'
+          $hash = (Get-FileHash 'capture-kit/PresentMon-2.5.1-x64.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '9bec3083069f58f911e6a512f4806db51a27bd096103087bc1d05ef54c80a191') { throw "PresentMon SHA256 mismatch: $hash" }
+          Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/GameTechDev/PresentMon/v2.5.1/LICENSE.txt' -OutFile capture-kit/LICENSE-PresentMon.txt
+          @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          if not exist "%~dp0PresentMon-2.5.1-x64.exe" (
+            echo Missing PresentMon executable. Extract the complete ZIP first.
+            pause
+            exit /b 1
+          )
+          if not exist results mkdir results
+          for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "STAMP=%%I"
+          echo Capturing wwm.exe only. Accept the UAC prompt, then return to the game.
+          echo 10-second delay, 60-second capture. Do not open menus during capture.
+          "%~dp0PresentMon-2.5.1-x64.exe" --process_name wwm.exe --session_name OptiScalerExact2x --delay 10 --timed 60 --terminate_after_timed --track_frame_type --track_hybrid_present --no_track_input --no_console_stats --output_file "%~dp0results\capture-%STAMP%.csv" --restart_as_admin
+          echo Capture results are saved in the results folder.
+          echo If UAC opened a separate capture process, wait for it to finish.
+          pause
+          '@ | Set-Content -Encoding ASCII capture-kit/Capture-60s.cmd
+          @'
+          實際呈現追蹤工具 — OptiScaler 67 -> 134 FPS 驗證
+          
+          此包與 dxgi.dll 更新包分開。不必放到遊戲目錄，不會修改畫質、驅動或遊戲設定。
+          內附官方 PresentMon 2.5.1 x64 執行檔，下載後校驗 SHA256：
+          9bec3083069f58f911e6a512f4806db51a27bd096103087bc1d05ef54c80a191
+          
+          用法：先進入同一個測試場景、啟用 XeFG 並等幀率穩定。
+          解壓到一般資料夾，雙擊 Capture-60s.cmd，接受 Windows UAC，10 秒內回到遊戲。
+          維持同一視角 60 秒，不要開選單或切換視窗。CSV 在 results 資料夾。
+          將 CSV 與相同測試的 OptiScaler.log 一起提供分析即可，不用安裝 Python。
+          
+          只追蹤 wwm.exe，不追蹤鍵盤/滑鼠輸入。工具會收集該行程的呈現與 GPU 事件。
+          --track_frame_type 用於區分應用程式/生成幀；實際可用性依 SDK/驅動事件而定。
+          無法識別的 FrameType、丟失事件或多個 swapchain 不可直接當成已驗證 2 倍。
+          CSV 的 SDK/CPU Present 次數不等於每張都顯示到螢幕；要查看顯示時間與丟幀資料。
+          請勿將 60 -> 120 或只是 output est. 的倍數視為達到同畫質 67 -> 134。
+          
+          對照：同一場景、同一個 v24 DLL，分別測試 [XeFG] AsyncColorTransfer=true / false，完整重開遊戲後各錄一次。
+          工具只做觀測，不自動更動 OptiScaler.ini，不設定 67 FPS 限制，不停止其他追蹤 session。
+          '@ | Set-Content -Encoding UTF8 capture-kit/README-zhTW.txt
+          Compress-Archive -Path capture-kit/* -DestinationPath OptiScaler-Exact2x-CaptureKit.zip -CompressionLevel Optimal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-Exact2x-CaptureKit
+          path: OptiScaler-Exact2x-CaptureKit.zip
+          if-no-files-found: error
+          compression-level: 0
