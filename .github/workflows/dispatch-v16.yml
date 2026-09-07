@@ -1,0 +1,20 @@
+name: Dispatch v16 XeFG No-Wait Build
+
+on:
+  push:
+    branches: [fix/v16-xefg-no-wait-pacing]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch existing build workflow on this v16 ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run build-multigpu-unsigned.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
