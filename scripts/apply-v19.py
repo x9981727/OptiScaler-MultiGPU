@@ -12,6 +12,8 @@ Present blocking; it may only adapt slowly upward if the render workload becomes
 heavier. Secondary async XeFG uses this value for Auto/Input pacing only.
 """
 from pathlib import Path
+import subprocess
+import sys
 
 kit = Path(__file__).resolve().parents[1]
 root = kit / 'upstream' / 'OptiScaler'
@@ -92,10 +94,6 @@ method = '''void XeFG_Dx12::RecordMultiGPURenderGap(double ms)
         _unblockedRenderGapMs.store(smoothed, std::memory_order_relaxed);
         return;
     }
-    // While FG is active, a much smaller gap is usually the symptom of the
-    // previous Present consuming the rest of the frame. Never train the pacing
-    // baseline downward from that feedback. A genuinely heavier render path can
-    // still raise the baseline slowly.
     if (ms > previous * 1.10)
         _unblockedRenderGapMs.store(previous * 0.90 + ms * 0.10, std::memory_order_relaxed);
 }
@@ -131,3 +129,4 @@ s = rep(s, log_anchor, log_insert)
 (root / p).write_text(s, encoding='utf-8')
 
 print('v19 applied: secondary XeFG Input pacing uses a pre-block render cadence baseline')
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v20.py')], check=True)
