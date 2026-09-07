@@ -1,0 +1,32 @@
+name: RDNA4 r4 original-layer development
+on:
+  push:
+    branches: [dlssnr-rdna4-layer-r4]
+    paths: ['rdna4/layer_r4/**', '.github/workflows/rdna4-layer-r4.yml']
+permissions:
+  contents: read
+concurrency:
+  group: rdna4-layer-r4-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install inspection toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Inspect original code and weight contract
+        run: python rdna4/layer_r4/inspect_original.py
+      - name: Store developer inspection reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r4-contract-inspection
+          path: |
+            rdna4/layer_r4/inspection/*.json
+            rdna4/layer_r4/inspection/*.isa.txt
+          retention-days: 7
