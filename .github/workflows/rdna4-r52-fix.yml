@@ -1,0 +1,157 @@
+name: RDNA4 r5.2 boundary parser fix
+on:
+  push:
+    branches: [dlssnr-rdna4-r52-boundary-fix]
+    paths: ['rdna4/forward_r5/**', '.github/workflows/rdna4-r52-fix.yml']
+permissions:
+  contents: read
+concurrency:
+  group: rdna4-r52-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compilation and inspection tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Rebuild unchanged r4 GPU code and CPU reference
+        run: python rdna4/layer_r4/build_layer.py
+      - name: Require GPU binary previously validated on user RX9070XT
+        run: |
+          echo '62c8ecf66e4290ffbe22230a376b475ef482807fe05c46b957457bff5826cffe  rdna4/layer_r4/build/head_r4_gfx1201.hsaco' | sha256sum -c -
+      - name: Apply exact-source boundary fix and generate r5.2 runner
+        run: python rdna4/forward_r5/prepare_r52.py
+      - name: Compile and run general parser and ZIP support checks
+        run: python rdna4/forward_r5/build_support.py
+      - name: Reproduce old failure and validate fixed boundary fragments under sanitizers
+        run: python rdna4/forward_r5/test_r52_build.py
+      - name: Preserve build inputs, patched sources and test reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r5.2-build-inputs
+          path: |
+            rdna4/layer_r4/build/head_r4_gfx1201.hsaco
+            rdna4/layer_r4/build/head_r4.isa.txt
+            rdna4/layer_r4/build/compile-report.json
+            rdna4/layer_r4/candidate_hash.hpp
+            rdna4/forward_r5/plan_core.hpp
+            rdna4/forward_r5/r52_original_plan_core.hpp
+            rdna4/forward_r5/forward_delivery.cpp
+            rdna4/forward_r5/deps/
+            rdna4/forward_r5/build/*.json
+            rdna4/forward_r5/build/fixture-*.zip
+          if-no-files-found: error
+          retention-days: 7
+  windows:
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDNA4-r5.2-build-inputs
+          path: device
+      - name: Compile Windows x64 hotfix executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item device/layer_r4/candidate_hash.hpp rdna4/layer_r4/
+          Copy-Item device/forward_r5/deps rdna4/forward_r5/ -Recurse
+          Copy-Item device/forward_r5/plan_core.hpp,device/forward_r5/r52_original_plan_core.hpp,device/forward_r5/forward_delivery.cpp rdna4/forward_r5/
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC x64 toolchain not found' }
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          @('@echo off',('call "'+$vcvars+'"'),'if errorlevel 1 exit /b 1',
+            'cl /nologo /O2 /MT /c /TC rdna4\forward_r5\deps\puff.c /Fo:package\puff.obj',
+            'if errorlevel 1 exit /b 1',
+            'cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\forward_r5\forward_delivery.cpp package\puff.obj /Fe:package\rdna4-r5-test.exe /Fo:package\forward_delivery.obj',
+            'exit /b %errorlevel%') | Set-Content build-r52.cmd -Encoding ascii
+          & cmd /d /c build-r52.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'r5.2 compilation failed' }
+      - name: Execute Windows regression, ZIP and negative tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path package/reports | Out-Null
+          foreach ($mode in @('stored','deflated')) {
+            & ./package/rdna4-r5-test.exe --cpu-self-test --fixture "device/forward_r5/build/fixture-$mode.zip" --output "package/reports/ci-$mode.json"
+            if ($LASTEXITCODE -ne 0) { throw "CPU regression/ZIP test failed: $mode" }
+            $r=Get-Content "package/reports/ci-$mode.json" -Raw | ConvertFrom-Json
+            if ($r.status -ne 'cpu_tests_passed_original_plan_and_gpu_not_tested' -or $r.gpu_attempted -or !$r.cpu_zip_fixture_passed -or $r.delivery_revision -ne 'r5.2' -or $r.cpu_boundary_regression_checks -lt 20) { throw 'Incorrect regression status' }
+            Copy-Item rdna4-r5-console.txt "package/reports/ci-$mode-console.txt"
+          }
+          # The three-call test fixture is NOT an original full plan. The raw
+          # SHA256 gate must reject it before HIP or any model is loaded.
+          & ./package/rdna4-r5-test.exe --output package/reports/ci-rejected-nonoriginal-plan.json --validate-plan-only --plan device/forward_r5/build/reported-boundary-fixture.json
+          if ($LASTEXITCODE -eq 0) { throw 'Partial boundary fixture accepted as original full plan' }
+          $bad=Get-Content package/reports/ci-rejected-nonoriginal-plan.json -Raw | ConvertFrom-Json
+          if ($bad.status -ne 'failed' -or $bad.gpu_attempted -or $bad.plan_validation_passed -or $bad.error -notlike '*exact recovered 1080p plan*') { throw 'Original plan hash gate was not preserved' }
+          Copy-Item rdna4-r5-console.txt package/reports/ci-rejected-nonoriginal-plan-console.txt
+          & ./package/rdna4-r5-test.exe --output package/reports/ci-rejected-cli.json --this-option-must-fail
+          if ($LASTEXITCODE -eq 0) { throw 'Invalid command line accepted' }
+          $bad=Get-Content package/reports/ci-rejected-cli.json -Raw | ConvertFrom-Json
+          if ($bad.status -ne 'failed' -or $bad.gpu_attempted -or !$bad.diagnostics) { throw 'Failure diagnostics absent' }
+          Copy-Item rdna4-r5-console.txt package/reports/ci-rejected-cli-console.txt
+          exit 0
+      - name: Assemble executable, unchanged kernels and reproducible source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package/source/forward_r5,package/source/layer_r4,package/source/tests,package/Licenses | Out-Null
+          Copy-Item device/layer_r4/build/head_r4_gfx1201.hsaco package/
+          Copy-Item device/layer_r4/build/compile-report.json,device/layer_r4/build/head_r4.isa.txt,device/forward_r5/build/r52-*.json,device/forward_r5/build/support-build-report.json,device/forward_r5/build/reported-boundary-fixture.json package/reports/
+          Copy-Item rdna4/forward_r5/README_R52_zh-TW.md package/README_zh-TW.md
+          Copy-Item rdna4/forward_r5/TEST_R52.cmd package/TEST_R5.cmd
+          Copy-Item rdna4/forward_r5/CHECK_PLAN_R52.cmd package/CHECK_PLAN_ONLY.cmd
+          Copy-Item rdna4/layer_r4/LICENSE.txt package/Licenses/INDEPENDENT_SOURCE_MIT.txt
+          Copy-Item rdna4/forward_r5/deps/JSON_LICENSE.MIT package/Licenses/
+          Copy-Item rdna4/forward_r5/deps/puff.h package/Licenses/PUFF_LICENSE_AND_HEADER.txt
+          Copy-Item rdna4/forward_r5/*.cpp,rdna4/forward_r5/*.hpp,rdna4/forward_r5/*.py package/source/forward_r5/
+          Copy-Item rdna4/forward_r5/deps package/source/forward_r5/ -Recurse
+          Copy-Item rdna4/layer_r4/head_direct.cl,rdna4/layer_r4/head_contract.hpp,rdna4/layer_r4/candidate_hash.hpp,rdna4/layer_r4/build_layer.py package/source/layer_r4/
+          Copy-Item rdna4/tests/linear_test.cpp package/source/tests/
+          Copy-Item .github/workflows/rdna4-r52-fix.yml package/source/
+          Remove-Item package/*.obj -ErrorAction SilentlyContinue
+          @{
+            revision='r5.2'
+            repository='x9981727/OptiScaler-MultiGPU'
+            branch='dlssnr-rdna4-r52-boundary-fix'
+            commit=$env:GITHUB_SHA
+            run_id=$env:GITHUB_RUN_ID
+            windows_exe_compiled=$true
+            cpu_boundary_regression_passed=$true
+            old_parser_failure_reproduced=$true
+            linux_sanitizers_passed=$true
+            windows_cpu_zip_and_hash_rejection_tests_passed=$true
+            exact_previous_r4_gpu_binary_preserved=$true
+            original_kernel_arguments_modified=$false
+            original_plan_hash_gate_removed=$false
+            full_original_checkpoint_read_in_ci=$false
+            regression_fixture_is_three_call_fragment_only=$true
+            gpu_executed_in_ci=$false
+            full_forward_executed_in_ci=$false
+            game_tested=$false
+            performance_improvement_claimed=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root=(Resolve-Path package).Path
+          Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative=$_.FullName.Substring($root.Length+1).Replace('\','/')
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$relative
+          } | Set-Content CHECKSUMS.tmp -Encoding ascii
+          Move-Item CHECKSUMS.tmp package/SHA256SUMS.txt
+      - name: Upload r5.2 boundary-fix runnable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r5.2-Boundary-Fix
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
