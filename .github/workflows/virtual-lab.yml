@@ -1,0 +1,104 @@
+name: XeFG virtual regression laboratory
+on:
+  push:
+    branches: [test/xefg-virtual-lab]
+    paths: ['lab/**', 'v25-sequence/**', 'scripts/**', 'v25/**', '.github/workflows/virtual-lab.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: xefg-virtual-lab-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  virtual-tests:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Reconstruct pinned v25 and run retained production regressions
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install pyyaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          from pathlib import Path
+          import subprocess, yaml
+          root=Path.cwd()
+          workflow=yaml.safe_load((root/'.github/workflows/build-v25.yml').read_text())
+          reached=False
+          for step in workflow['jobs']['build']['steps']:
+              if step.get('name')=='Build Windows Release x64 DLL':
+                  reached=True
+                  break
+              if 'run' not in step: continue
+              print('RECONSTRUCT:',step['name'],flush=True)
+              subprocess.run(['powershell','-NoProfile','-NonInteractive','-Command','$ErrorActionPreference="Stop";\n'+step['run']],check=True)
+          if not reached: raise RuntimeError('Baseline workflow boundary changed')
+          '@ | Set-Content -Encoding UTF8 lab-reconstruct.py
+          python lab-reconstruct.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Apply verified sequence correction to real production source
+        shell: powershell
+        run: |
+          python lab/prepare_lab.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build isolated test executables
+        shell: powershell
+        run: |
+          cmake -S lab -B lab-build -G 'Visual Studio 17 2022' -A x64 -T v143
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build lab-build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run million-event protocol and full-resolution WARP tests
+        shell: powershell
+        run: |
+          ctest --test-dir lab-build -C Release --output-on-failure --no-tests=error --output-log lab-results/ctest.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item lab-build/Testing/Temporary/LastTest.log lab-results/test-details.log
+      - name: Verify timing gate rejects both known regression classes
+        shell: powershell
+        run: |
+          python -m unittest discover -s lab -p test_trace_gate.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Observe VM graphics and actually probe Intel SDK capability
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,DriverVersion | ConvertTo-Json | Set-Content -Encoding UTF8 lab-results/windows-video-inventory.json
+          python lab/run_probe.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile candidate for source compatibility only - NOT a game release
+        shell: powershell
+        run: |
+          msbuild upstream/OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dll = 'upstream/x64/Release/a/OptiScaler.dll'
+          if (-not (Test-Path $dll)) { throw 'Candidate DLL missing' }
+          Get-FileHash $dll -Algorithm SHA256 | Format-List | Out-String | Set-Content lab-results/candidate-build-hash.txt
+          @('Compiled only. NOT released for installation.', 'No target-hardware cadence/flicker acceptance.', "Commit: $env:GITHUB_SHA", "Run: $env:GITHUB_RUN_ID") | Set-Content lab-results/build-status.txt
+      - name: Preserve production headers used by the tests
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force lab-results/production | Out-Null
+          foreach ($name in @('ManagedXeFGProtocol.h','ManagedXeFGSequence.h','XeFGTransferPool.h','CopyCommonTexture.h','QueueIdle_Dx12.h')) {
+            $p = "upstream/OptiScaler/framegen/$name"
+            if (Test-Path $p) { Copy-Item $p lab-results/production/ }
+          }
+          if (Test-Path upstream/LICENSE) { Copy-Item upstream/LICENSE lab-results/ }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: XeFG-virtual-lab-tests-and-reports
+          path: |
+            lab-results/**
+            lab-build/Release/protocol-stress.exe
+            lab-build/Release/sequence-regression.exe
+            lab-build/Release/copy-stress.exe
+            lab-build/Release/sdk-probe.exe
+            lab/**
+            v25-sequence/**
+          if-no-files-found: error
+          retention-days: 30
