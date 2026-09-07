@@ -1,8 +1,8 @@
-name: Dispatch v17 XeFG Latency Arm Build
+name: Dispatch v18 XeFG Input Frame Time Build
 
 on:
   push:
-    branches: [fix/v17-xefg-latency-arm]
+    branches: [fix/v18-xefg-input-frametime]
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,7 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch existing build workflow on this v17 ref
+      - name: Dispatch existing build workflow on this v18 ref
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
