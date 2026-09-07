@@ -53,3 +53,4 @@ s = rep(s, anchor, replacement)
 print('v18 applied: secondary async XeFG auto frame-time source restored to Input cadence; explicit overrides preserved')
 
 subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v19.py')], check=True)
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v20.py')], check=True)
