@@ -1,0 +1,90 @@
+name: Build v24 lossless XeFG exact-2x experiment
+on:
+  push:
+    branches: [fix/v24-xefg-exact-2x]
+    paths: ['v24/**', 'scripts/apply-v24.py', '.github/workflows/build-v24.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v24-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Reconstruct v23 and run existing regression tests
+        shell: powershell
+        run: |
+          python -m pip install pyyaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          from pathlib import Path
+          import subprocess, yaml
+          root = Path.cwd()
+          workflow = yaml.safe_load((root/'.github/workflows/build-multigpu-unsigned.yml').read_text())
+          for step in workflow['jobs']['build']['steps']:
+              if step.get('name') == 'Build Release':
+                  break
+              if 'run' not in step:
+                  continue
+              print('V23 BASELINE:', step['name'], flush=True)
+              subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference="Stop";\n' + step['run']], check=True)
+          '@ | Set-Content -Encoding UTF8 build_v23_base.py
+          python build_v23_base.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Apply verified v24 lossless COPY pipeline
+        shell: powershell
+        run: |
+          python scripts/apply-v24.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test actual v24 COPY handoff, bit-exact pixels and slot ownership on WARP
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          msbuild v24\copy-pipeline-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v24\out\copy-pipeline-test.exe" | Tee-Object -FilePath v24\test-output.txt
+          if ($LASTEXITCODE -ne 0) { throw "v24 COPY regression failed: $LASTEXITCODE" }
+      - name: Build Windows Release x64
+        shell: powershell
+        run: |
+          msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify and package v24 DLL
+        shell: powershell
+        run: |
+          $dll = Join-Path $env:GITHUB_WORKSPACE 'upstream\x64\Release\a\OptiScaler.dll'
+          if (-not (Test-Path $dll)) { throw 'No compiled DLL' }
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll))
+          foreach ($marker in @('MultiGPU v24: dedicated COPY queue ready', 'MultiGPU v24 color:', 'MultiGPU v24 exact2x:', 'MultiGPU v17:', 'MultiGPU v22:')) {
+            if (-not $ascii.Contains($marker)) { throw "Missing marker: $marker" }
+          }
+          if ($ascii.Contains('MultiGPU v21 backpressure: dropped busy source frame')) { throw 'Unsafe source shedding returned' }
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'v24-package'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item $dll "$stage\dxgi.dll"
+          Copy-Item v24\README-v24-zhTW.txt $stage
+          $hash = (Get-FileHash "$stage\dxgi.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $upstream = git -C upstream rev-parse HEAD
+          @("Build kit commit: $env:GITHUB_SHA", "Upstream commit: $upstream", "Run: $env:GITHUB_RUN_ID", "dxgi.dll SHA256: $hash", 'Target: same-quality 67 rendered / 134 displayed FPS. Hardware result: NOT MEASURED BY CI.', 'Tests: v23 regressions plus production v24 COPY handoff on WARP.') | Set-Content -Encoding UTF8 "$stage\BUILD-MANIFEST.txt"
+          Copy-Item v24\test-output.txt $stage
+          Get-ChildItem upstream -File | Where-Object { $_.Name -match '^LICENSE|^COPYING' } | ForEach-Object { Copy-Item $_.FullName $stage }
+          Compress-Archive -Path "$stage\*" -DestinationPath OptiScaler-MultiGPU-v24-DXGI-update.zip -CompressionLevel Optimal
+          @("$hash  dxgi.dll", "$((Get-FileHash OptiScaler-MultiGPU-v24-DXGI-update.zip -Algorithm SHA256).Hash.ToLowerInvariant())  OptiScaler-MultiGPU-v24-DXGI-update.zip") | Set-Content -Encoding ASCII OptiScaler-MultiGPU-v24-SHA256.txt
+          $review = Join-Path $env:GITHUB_WORKSPACE 'v24-source-review'
+          New-Item -ItemType Directory -Force $review | Out-Null
+          Copy-Item v24\exact-2x.patch, scripts\apply-v24.py, v24\copy-pipeline-test.cpp, v24\copy-pipeline-test.vcxproj, v24\test-output.txt $review
+          Compress-Archive -Path "$review\*" -DestinationPath OptiScaler-MultiGPU-v24-source-review.zip -CompressionLevel Optimal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-MultiGPU-v24-DXGI-update
+          path: |
+            OptiScaler-MultiGPU-v24-DXGI-update.zip
+            OptiScaler-MultiGPU-v24-SHA256.txt
+            OptiScaler-MultiGPU-v24-source-review.zip
+          if-no-files-found: error
+          compression-level: 0
