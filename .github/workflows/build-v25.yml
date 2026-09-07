@@ -1,0 +1,108 @@
+name: Build v25 XeFG compositor pacing experiment
+on:
+  push:
+    branches: [fix/v25-xefg-compositor-pacing]
+    paths: ['v25/**', 'scripts/apply-v25.py', '.github/workflows/build-v25.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v25-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Reconstruct v23 and run retained regressions
+        shell: powershell
+        run: |
+          python -m pip install pyyaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          from pathlib import Path
+          import subprocess, yaml
+          root = Path.cwd()
+          workflow = yaml.safe_load((root/'.github/workflows/build-multigpu-unsigned.yml').read_text())
+          for step in workflow['jobs']['build']['steps']:
+              if step.get('name') == 'Build Release': break
+              if 'run' not in step: continue
+              print('BASELINE:', step['name'], flush=True)
+              subprocess.run(['powershell','-NoProfile','-NonInteractive','-Command','$ErrorActionPreference="Stop";\n'+step['run']],check=True)
+          '@ | Set-Content -Encoding UTF8 prepare_baseline.py
+          python prepare_baseline.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain verified v24 secondary COPY pipeline
+        shell: powershell
+        run: |
+          python scripts/apply-v24.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild v24\copy-pipeline-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v24\out\copy-pipeline-test.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'v24 COPY regression failed' }
+      - name: Apply checksum-verified v25 compositor and primary export changes
+        shell: powershell
+        run: |
+          python scripts/apply-v25.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test production compositor protocol and FSRFG scope isolation
+        shell: powershell
+        run: |
+          msbuild v25\protocol-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v25\out-protocol\protocol-test.exe" | Tee-Object v25\protocol-results.txt
+          if ($LASTEXITCODE -ne 0) { throw 'v25 protocol regression failed' }
+      - name: Test DIRECT-COPY-COPY-DIRECT ordering and three-slot pixel ownership on WARP
+        shell: powershell
+        timeout-minutes: 3
+        run: |
+          msbuild v25\copy-pipeline-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE\v25\out\copy-pipeline-test.exe" | Tee-Object v25\copy-results.txt
+          if ($LASTEXITCODE -ne 0) { throw 'v25 primary COPY regression failed' }
+      - name: Build Windows Release x64 DLL
+        shell: powershell
+        run: |
+          msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify binary and package versioned DLL and readable source
+        shell: powershell
+        run: |
+          $dll = Join-Path $env:GITHUB_WORKSPACE 'upstream\x64\Release\a\OptiScaler.dll'
+          if (-not (Test-Path $dll)) { throw 'No compiled DLL' }
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll))
+          foreach ($marker in @('MultiGPU v25 compositor:', 'MultiGPU v25: independent primary COPY export ready', 'MultiGPU v25 input contract:', 'MultiGPU v24 color:', 'MultiGPU v22:')) {
+            if (-not $ascii.Contains($marker)) { throw "Missing marker: $marker" }
+          }
+          if ($ascii.Contains('MultiGPU v21 backpressure: dropped busy source frame')) { throw 'Unsafe source shedding returned' }
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'v25-package'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item $dll "$stage\dxgi.dll"
+          Copy-Item v25\README-v25-zhTW.txt,v25\protocol-results.txt,v25\copy-results.txt $stage
+          $hash = (Get-FileHash "$stage\dxgi.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $upstream = git -C upstream rev-parse HEAD
+          @("Build kit commit: $env:GITHUB_SHA", "Upstream commit: $upstream", "Run: $env:GITHUB_RUN_ID", "dxgi.dll SHA256: $hash", 'Hardware FPS / XeFG visual quality: NOT MEASURED BY CI.', 'Tests: retained regressions; production compositor helper; small-texture four-queue WARP ownership test.') | Set-Content -Encoding UTF8 "$stage\BUILD-MANIFEST.txt"
+          Get-ChildItem upstream -File | Where-Object { $_.Name -match '^LICENSE|^COPYING' } | ForEach-Object { Copy-Item $_.FullName $stage }
+          Compress-Archive -Path "$stage\*" -DestinationPath OptiScaler-MultiGPU-v25-DXGI-update.zip -CompressionLevel Optimal
+          @("$hash  dxgi.dll", "$((Get-FileHash OptiScaler-MultiGPU-v25-DXGI-update.zip -Algorithm SHA256).Hash.ToLowerInvariant())  OptiScaler-MultiGPU-v25-DXGI-update.zip") | Set-Content -Encoding ASCII OptiScaler-MultiGPU-v25-SHA256.txt
+          $review = Join-Path $env:GITHUB_WORKSPACE 'v25-source-review'
+          New-Item -ItemType Directory -Force "$review\framegen\xefg","$review\hooks","$review\wrapped" | Out-Null
+          Copy-Item v25\managed-pacing.patch,v25\*.cpp,v25\*.vcxproj,v25\*results.txt,v25\README*,scripts\apply-v25.py $review
+          Copy-Item upstream\OptiScaler\framegen\ManagedXeFGProtocol.h,upstream\OptiScaler\framegen\CopyCommonTexture.h,upstream\OptiScaler\framegen\IFGFeature_Dx12.h,upstream\OptiScaler\framegen\MultiGPU_Dx12.cpp "$review\framegen"
+          Copy-Item upstream\OptiScaler\framegen\xefg\XeFG_Dx12.cpp,upstream\OptiScaler\framegen\xefg\XeFG_Dx12.h "$review\framegen\xefg"
+          Copy-Item upstream\OptiScaler\hooks\Reflex_Hooks.cpp,upstream\OptiScaler\hooks\FG_Hooks.cpp "$review\hooks"
+          Copy-Item upstream\OptiScaler\wrapped\wrapped_swapchain.cpp,upstream\OptiScaler\wrapped\wrapped_swapchain.h "$review\wrapped"
+          Copy-Item upstream\OptiScaler\Config.cpp,upstream\OptiScaler\Config.h,"$stage\BUILD-MANIFEST.txt" $review
+          Compress-Archive -Path "$review\*" -DestinationPath OptiScaler-MultiGPU-v25-source-review.zip -CompressionLevel Optimal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-MultiGPU-v25-DXGI-update
+          path: |
+            OptiScaler-MultiGPU-v25-DXGI-update.zip
+            OptiScaler-MultiGPU-v25-SHA256.txt
+            OptiScaler-MultiGPU-v25-source-review.zip
+          if-no-files-found: error
+          compression-level: 0
