@@ -1,0 +1,42 @@
+--- a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
++++ b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
+@@ -1,6 +1,7 @@
+ #include "pch.h"
+ #include "XeFG_Dx12.h"
+ #include <framegen/ManagedXeFGProtocol.h>
++#include <framegen/ManagedXeFGSequence.h>
+ #include <framegen/XeFGPresentPolicy.h>
+ #include <framegen/XeFGNoWaitPolicy.h>
+ #include <framegen/XeFGLatencyPolicy.h>
+@@ -1597,10 +1598,10 @@
+     // The outer swapchain serializes all SDK control calls against completion.
+     static_assert(XELL_SIMULATION_START == 0 && XELL_PRESENT_END == 5);
+     const auto context = XeLLProxy::Context();
+-    const uint32_t compositorId = ++_managedSerial;
+     const auto sleepFn = XeLLProxy::Sleep();
+     const auto markerFn = XeLLProxy::AddMarkerData();
+     const bool complete = packet && packet->id != 0 && packet->retained[0] && packet->retained[1];
++    const uint32_t compositorId = MultiGPU::NextManagedXeFGId(_managedSerial, complete);
+     const auto fallback = [&](int reason) -> std::int32_t {
+         ++_managedFallbacks;
+         _managedReset = true;
+--- /dev/null
++++ b/OptiScaler/framegen/ManagedXeFGSequence.h
+@@ -0,0 +1,17 @@
++#pragma once
++#include <cstdint>
++#include <limits>
++
++namespace MultiGPU
++{
++// One ID per actual compositor protocol attempt, NOT per outer Present.
++// An incomplete original-only packet never calls XeLL Sleep/markers and must
++// not advance their sequence. This addresses the observed gap on reactivation.
++// It does not repair the worker timeline/pacing algorithm or image contents.
++inline std::uint32_t NextManagedXeFGId(std::uint32_t& last, bool complete) noexcept
++{
++    if (!complete || last == (std::numeric_limits<std::uint32_t>::max)())
++        return 0; // original-only fallback; recreate context before wraparound
++    return ++last;
++}
++}
