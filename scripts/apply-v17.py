@@ -1,5 +1,7 @@
 """Restore XeLL latency-reduction arming while retaining the v16 external sleep bypass."""
 from pathlib import Path
+import subprocess
+import sys
 
 kit = Path(__file__).resolve().parents[1]
 root = kit / 'upstream' / 'OptiScaler'
@@ -57,3 +59,5 @@ s = rep(s, anchor, replacement)
 (root / p).write_text(s, encoding='utf-8')
 (root / 'framegen/XeFGLatencyPolicy.h').write_text((kit / 'v17' / 'XeFGLatencyPolicy.h').read_text(encoding='utf-8'), encoding='utf-8')
 print('v17 applied: XeLL latency reduction stays armed while secondary async external sleep pacing remains bypassed')
+
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v18.py')], check=True)
