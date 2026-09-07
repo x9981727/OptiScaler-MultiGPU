@@ -1,0 +1,150 @@
+name: RDNA4 AutoLab virtual validation
+on:
+  push:
+    branches: [dlssnr-rdna4-r6-autolab]
+    paths: ['rdna4/autolab/**', '.github/workflows/rdna4-autolab.yml']
+permissions:
+  contents: read
+concurrency:
+  group: rdna4-autolab-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned-family build and inspection tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Rebuild and verify unchanged GPU code
+        run: |
+          python rdna4/layer_r4/build_layer.py
+          echo '62c8ecf66e4290ffbe22230a376b475ef482807fe05c46b957457bff5826cffe  rdna4/layer_r4/build/head_r4_gfx1201.hsaco' | sha256sum -c -
+      - name: Reproduce and repair known parser boundaries
+        run: |
+          python rdna4/forward_r5/prepare_r52.py
+          python rdna4/forward_r5/build_support.py
+          python rdna4/forward_r5/test_r52_build.py
+      - name: Generate bounded AutoLab runner
+        run: python rdna4/autolab/prepare_autolab.py
+      - name: Execute Debug, sanitized and optimized virtual tests
+        run: python rdna4/autolab/run_cpu_lab.py
+      - name: Upload generated code and VM evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-AutoLab-build-inputs
+          path: |
+            rdna4/layer_r4/build/head_r4_gfx1201.hsaco
+            rdna4/layer_r4/build/head_r4.isa.txt
+            rdna4/layer_r4/build/compile-report.json
+            rdna4/layer_r4/candidate_hash.hpp
+            rdna4/forward_r5/forward_autolab.cpp
+            rdna4/forward_r5/forward_delivery.cpp
+            rdna4/forward_r5/plan_core.hpp
+            rdna4/forward_r5/r52_original_plan_core.hpp
+            rdna4/forward_r5/deps/
+            rdna4/forward_r5/build/*.json
+            rdna4/forward_r5/build/fixture-*.zip
+            rdna4/autolab/reports/
+          if-no-files-found: error
+          retention-days: 14
+  windows-vm:
+    needs: linux-vm
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDNA4-AutoLab-build-inputs
+          path: device
+      - name: Compile actual Windows x64 AutoLab executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package/reports | Out-Null
+          Copy-Item device/layer_r4/candidate_hash.hpp rdna4/layer_r4/
+          Copy-Item device/forward_r5/deps rdna4/forward_r5/ -Recurse
+          Copy-Item device/forward_r5/forward_autolab.cpp,device/forward_r5/forward_delivery.cpp,device/forward_r5/plan_core.hpp,device/forward_r5/r52_original_plan_core.hpp rdna4/forward_r5/
+          $vswhere="${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC x64 missing' }
+          $vcvars=Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          @('@echo off',('call "'+$vcvars+'"'),'if errorlevel 1 exit /b 1',
+            'cl /nologo /O2 /MT /c /TC rdna4\forward_r5\deps\puff.c /Fo:package\puff.obj','if errorlevel 1 exit /b 1',
+            'cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\forward_r5\forward_autolab.cpp package\puff.obj /Fe:package\rdna4-autolab.exe /Fo:package\autolab.obj',
+            'exit /b %errorlevel%') | Set-Content build-autolab.cmd -Encoding ascii
+          & cmd /d /c build-autolab.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'AutoLab compilation failed' }
+      - name: Run Windows CPU, ZIP and rejection tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($mode in @('stored','deflated')) {
+            & ./package/rdna4-autolab.exe --cpu-self-test --fixture "device/forward_r5/build/fixture-$mode.zip" --output "package/reports/windows-$mode.json"
+            if ($LASTEXITCODE -ne 0) { throw "Windows CPU test failed: $mode" }
+            $r=Get-Content "package/reports/windows-$mode.json" -Raw | ConvertFrom-Json
+            if ($r.delivery_revision -ne 'r6.0' -or $r.gpu_attempted -or !$r.cpu_zip_fixture_passed -or $r.virtual_contract_checks -le 0 -or $r.candidate_policy_checks -lt 8) { throw 'Unexpected virtual test result' }
+            Copy-Item rdna4-r6-console.txt "package/reports/windows-$mode-console.txt"
+          }
+          & ./package/rdna4-autolab.exe --validate-plan-only --plan device/forward_r5/build/fixture-stored.zip --output package/reports/rejected-nonoriginal-plan.json
+          if ($LASTEXITCODE -eq 0) { throw 'Nonoriginal plan was incorrectly accepted' }
+          $r=Get-Content package/reports/rejected-nonoriginal-plan.json -Raw | ConvertFrom-Json
+          if ($r.status -ne 'failed' -or $r.gpu_attempted) { throw 'Hash rejection failed' }
+          Copy-Item rdna4-r6-console.txt package/reports/rejected-nonoriginal-plan-console.txt
+          exit 0
+      - name: Assemble validation environment and executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package/source/autolab,package/source/forward_r5,package/source/layer_r4,package/source/tests,package/Licenses | Out-Null
+          Copy-Item device/layer_r4/build/head_r4_gfx1201.hsaco package/
+          Copy-Item device/layer_r4/build/compile-report.json,device/layer_r4/build/head_r4.isa.txt package/reports/
+          Copy-Item device/autolab/reports/* package/reports/
+          Copy-Item device/forward_r5/build/*.json package/reports/
+          Copy-Item rdna4/autolab/README_zh-TW.md,rdna4/autolab/RUN_AUTOLAB.cmd package/
+          Copy-Item rdna4/autolab/*.hpp,rdna4/autolab/*.cpp,rdna4/autolab/*.py package/source/autolab/
+          Copy-Item rdna4/forward_r5/*.hpp,rdna4/forward_r5/*.cpp,rdna4/forward_r5/*.py package/source/forward_r5/
+          Copy-Item rdna4/forward_r5/deps package/source/forward_r5/ -Recurse
+          Copy-Item rdna4/layer_r4/head_contract.hpp,rdna4/layer_r4/head_direct.cl,rdna4/layer_r4/candidate_hash.hpp,rdna4/layer_r4/build_layer.py package/source/layer_r4/
+          Copy-Item rdna4/tests/linear_test.cpp package/source/tests/
+          Copy-Item .github/workflows/rdna4-autolab.yml package/source/
+          Copy-Item rdna4/layer_r4/LICENSE.txt package/Licenses/INDEPENDENT_SOURCE_MIT.txt
+          Copy-Item rdna4/forward_r5/deps/JSON_LICENSE.MIT package/Licenses/
+          Copy-Item rdna4/forward_r5/deps/puff.h package/Licenses/PUFF_LICENSE_AND_HEADER.txt
+          Remove-Item package/*.obj -ErrorAction SilentlyContinue
+          @{
+            revision='r6.0-autolab'
+            repository='x9981727/OptiScaler-MultiGPU'
+            branch='dlssnr-rdna4-r6-autolab'
+            commit=$env:GITHUB_SHA
+            run_id=$env:GITHUB_RUN_ID
+            linux_virtual_tests_passed=$true
+            linux_configurations=@('debug','address-and-undefined-sanitized','optimized')
+            windows_executable_built=$true
+            windows_cpu_tests_passed=$true
+            original_gpu_code_statically_inspected=$true
+            actual_target_gpu_executed_in_ci=$false
+            full_checkpoint_executed_in_ci=$false
+            complete_swin_rewritten=$false
+            sustained_speedup_established=$false
+            game_tested=$false
+            final_game_release_approved=$false
+            continuous_background_agent_running=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root=(Resolve-Path package).Path
+          Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$_.FullName.Substring($root.Length+1).Replace('\','/')
+          } | Set-Content AUTOLAB_SHA256SUMS.txt -Encoding ascii
+          Move-Item AUTOLAB_SHA256SUMS.txt package/SHA256SUMS.txt
+      - name: Publish built validation environment, not a final game DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r6-AutoLab
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
