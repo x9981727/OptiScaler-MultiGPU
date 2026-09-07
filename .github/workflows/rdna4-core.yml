@@ -1,0 +1,27 @@
+name: RDNA4 core development
+on:
+  push:
+    branches: [dlssnr-rdna4-core-r1]
+    paths: ['rdna4/**', '.github/workflows/rdna4-core.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install analysis tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Audit pinned runtime
+        run: python rdna4/tools/audit_runtime.py
+      - name: Upload audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DLSSNR-RDNA4-Core-Audit
+          path: rdna4/audit/
+          retention-days: 7
