@@ -1,0 +1,128 @@
+name: RDNA4 r2 packing-aware test kit
+on:
+  push:
+    branches: [dlssnr-rdna4-core-r2]
+    paths: ['rdna4/**', '.github/workflows/rdna4-r2.yml']
+permissions:
+  contents: read
+concurrency:
+  group: rdna4-r2-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  device:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler and inspection libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Compile and inspect seven GPU kernels
+        run: python rdna4/tools/build_r2.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r2-device
+          path: |
+            rdna4/build/packed_r2_gfx1201.hsaco
+            rdna4/build/packed_r2.isa.txt
+            rdna4/build/r2-compile-report.json
+          if-no-files-found: error
+          retention-days: 7
+  windows:
+    needs: device
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDNA4-r2-device
+          path: device
+      - name: Build Windows x64 test executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force package | Out-Null
+          $vswhere="${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC toolchain not found' }
+          $vcvars=Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          @('@echo off',('call "'+$vcvars+'"'),'if errorlevel 1 exit /b 1','cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\tests\packed_test.cpp /Fe:package\rdna4-r2.exe /Fo:package\packed_test.obj','exit /b %errorlevel%') | Set-Content build-r2.cmd -Encoding ascii
+          & cmd /d /c build-r2.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'r2 Windows build failed' }
+      - name: Run CPU correctness and byte-packing tests
+        shell: pwsh
+        run: |
+          & ./package/rdna4-r2.exe --cpu-self-test --output package/ci-cpu-test.json
+          if ($LASTEXITCODE -ne 0) { throw 'CPU correctness tests failed' }
+          $r=Get-Content package/ci-cpu-test.json -Raw | ConvertFrom-Json
+          if ($r.status -ne 'cpu_tests_passed_gpu_not_run' -or $r.gpu_attempted -or $r.cpu_checks -lt 40000) { throw 'Invalid CPU test status' }
+          Get-Content package/ci-cpu-test.json
+      - name: Package sources, binary, checksums and explicit test status
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force package/reports,package/source,package/source/kernels,package/source/tests,package/source/tools | Out-Null
+          Copy-Item device/packed_r2_gfx1201.hsaco package/
+          Copy-Item device/packed_r2.isa.txt,device/r2-compile-report.json package/reports/
+          Move-Item package/ci-cpu-test.json package/reports/
+          Copy-Item rdna4/README_r2_zh-TW.md package/README_zh-TW.md
+          Copy-Item rdna4/kernels/linear.cl,rdna4/kernels/packed_r2.cl package/source/kernels/
+          Copy-Item rdna4/tests/linear_test.cpp,rdna4/tests/packed_test.cpp package/source/tests/
+          Copy-Item rdna4/tools/build_r2.py package/source/tools/
+          Copy-Item .github/workflows/rdna4-r2.yml package/source/
+          Remove-Item package/packed_test.obj
+          @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          echo RDNA4 r2 - standalone linear/packing test. NOT a game DLL.
+          echo Close games and other GPU-heavy programs before testing.
+          "%~dp0rdna4-r2.exe" --output "%~dp0rdna4-r2-result.json" > "%~dp0rdna4-r2-console.txt" 2>&1
+          set "code=%errorlevel%"
+          type "%~dp0rdna4-r2-console.txt"
+          echo Exit code: %code%
+          echo Results: rdna4-r2-result.json and rdna4-r2-console.txt
+          pause
+          exit /b %code%
+          '@ | Set-Content package/TEST_R2.cmd -Encoding ascii
+          @'
+          MIT License
+          Copyright (c) 2026 RDNA4 Core contributors
+          Permission is hereby granted, free of charge, to any person obtaining a copy
+          of this software and associated documentation files (the "Software"), to deal
+          in the Software without restriction, including without limitation the rights
+          to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+          copies of the Software, and to permit persons to whom the Software is
+          furnished to do so, subject to the following conditions:
+          The above copyright notice and this permission notice shall be included in all
+          copies or substantial portions of the Software.
+          THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+          IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+          FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+          AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+          LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+          OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+          SOFTWARE.
+          '@ | Set-Content package/LICENSE_r2.txt -Encoding ascii
+          @{
+            branch='dlssnr-rdna4-core-r2';commit=$env:GITHUB_SHA;run_id=$env:GITHUB_RUN_ID
+            compiled_device_code=$true;cpu_tests_passed=$true;gpu_tested_in_ci=$false
+            nr_model_replacement=$false;game_tested=$false;speedup_claimed=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root=(Resolve-Path package).Path
+          $lines=Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$_.FullName.Substring($root.Length+1).Replace('\','/')
+          }
+          $lines | Set-Content package/SHA256SUMS.txt -Encoding ascii
+          Get-ChildItem package -Recurse -File | Select-Object FullName,Length
+      - name: Upload complete r2 test ZIP contents
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r2-Test
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
