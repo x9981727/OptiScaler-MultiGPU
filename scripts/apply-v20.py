@@ -12,6 +12,8 @@ small, reversible pacing change; explicit Present/Zero frame-time modes remain
 untouched.
 """
 from pathlib import Path
+import subprocess
+import sys
 
 kit = Path(__file__).resolve().parents[1]
 root = kit / 'upstream' / 'OptiScaler'
@@ -40,10 +42,6 @@ old = '''void XeFG_Dx12::RecordMultiGPURenderGap(double ms)
         _unblockedRenderGapMs.store(smoothed, std::memory_order_relaxed);
         return;
     }
-    // While FG is active, a much smaller gap is usually the symptom of the
-    // previous Present consuming the rest of the frame. Never train the pacing
-    // baseline downward from that feedback. A genuinely heavier render path can
-    // still raise the baseline slowly.
     if (ms > previous * 1.10)
         _unblockedRenderGapMs.store(previous * 0.90 + ms * 0.10, std::memory_order_relaxed);
 }
@@ -72,3 +70,4 @@ s = rep(s, anchor, replacement)
 (root / p).write_text(s, encoding='utf-8')
 
 print('v20 applied: pre-FG render cadence is frozen for the lifetime of active secondary XeFG')
+subprocess.run([sys.executable, str(kit / 'scripts' / 'apply-v21.py')], check=True)
