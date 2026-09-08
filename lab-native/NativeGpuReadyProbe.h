@@ -1,13 +1,14 @@
 #pragma once
 #include <windows.h>
 #include <d3d12.h>
+#include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <vector>
 #include <cstdint>
 #include <cstring>
 namespace NativeGateLab {
 class NativeGpuReadyProbe {
- using Microsoft::WRL::ComPtr;
+ template<typename T> using ComPtr=Microsoft::WRL::ComPtr<T>;
  struct Slot {ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;UINT64 ticket=0;};
  ComPtr<ID3D12CommandQueue> queue;ComPtr<ID3D12QueryHeap> queries;ComPtr<ID3D12Resource> readback;
  std::vector<Slot> slots;UINT64 frequency=0;unsigned char* mapped=nullptr;
