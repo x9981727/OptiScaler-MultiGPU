@@ -1,0 +1,78 @@
+name: Build isolated XeFG timing controls
+on:
+  push:
+    branches: [test/xefg-buffered-output-pacing]
+    paths: [.github/workflows/timing-hints.yml, lab-native-gate/probe_timing.py]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: intel/xess
+          ref: 207b703ad215da5b86dde04819a16277a96980aa
+          path: intel-reference
+      - uses: actions/checkout@v4
+        with:
+          repository: microsoft/Detours
+          ref: e4bfd6b03e50de46b47abfbd1e46b384f0c5f833
+          path: detours
+      - name: Build pinned instrumentation library
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'No C++ tools' }
+          @('@echo off', ('call "{0}\VC\Auxiliary\Build\vcvars64.bat"' -f $vs), 'if errorlevel 1 exit /b 1', ('cd /d "{0}\detours\src"' -f $env:GITHUB_WORKSPACE), 'nmake /nologo') | Set-Content build-detours.cmd -Encoding ascii
+          cmd.exe /d /c build-detours.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'Detours build failed' }
+      - name: Reconstruct isolated timing experiment
+        shell: pwsh
+        run: |
+          python lab-ring/apply_reference_ring.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Ring check failed' }
+          python lab-native-gate/prepare.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Native check failed' }
+          python lab-native-gate/prepare_buffered.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Buffered check failed' }
+          python lab-native-gate/probe_timing.py intel-reference/samples/basic_sample_frame_generation
+          if ($LASTEXITCODE -ne 0) { throw 'Timing instrumentation check failed' }
+      - name: Compile isolated diagnostic executable
+        shell: pwsh
+        run: |
+          cmake -S intel-reference/samples/basic_sample_frame_generation -B reference-build -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Configuration failed' }
+          cmake --build reference-build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+      - name: Preserve actual compiler inputs and licenses
+        shell: pwsh
+        run: |
+          $out = 'reference-build/bin/Release'
+          Copy-Item intel-reference/LICENSE.txt "$out/INTEL-SDK-LICENSE.txt"
+          Copy-Item intel-reference/third-party-programs.txt "$out/third-party-programs.txt"
+          Copy-Item detours/LICENSE.md "$out/DETOURS-LICENSE.md"
+          New-Item reference-build/source-review -ItemType Directory -Force | Out-Null
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp reference-build/source-review/
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h reference-build/source-review/
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/native_gate.cpp reference-build/source-review/
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/buffered_output.h reference-build/source-review/
+          Copy-Item lab-native-gate/*.py reference-build/source-review/
+          'Isolated same-resolution timing controls. Environment variables affect this executable only. No game DLL or game settings deployment. Recording source frame IDs is measurement, not performance certification.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          Get-ChildItem reference-build/source-review -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path)" } | Set-Content reference-build/source-sha256.txt -Encoding utf8
+          Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content reference-build/sha256.txt -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XeFG-source-timing-controls
+          path: |
+            reference-build/bin/Release/
+            reference-build/source-review/
+            reference-build/sha256.txt
+            reference-build/source-sha256.txt
+          retention-days: 7
+          if-no-files-found: error
