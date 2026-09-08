@@ -234,7 +234,11 @@ int RunOnAdapter(IDXGIAdapter1* adapter) {
     if (FAILED(base11.As(&device11)) || FAILED(baseContext.As(&context11))) return 30;
     std::array<ComPtr<ID3D11Texture2D>, 3> opened;
     ComPtr<ID3D11Fence> openedFence;
-    if (FAILED(local.OpenD3D11(device11.Get(), opened, openedFence))) return 31;
+    hr = local.OpenD3D11(device11.Get(), opened, openedFence);
+    if (FAILED(hr)) {
+        std::cerr << "OpenD3D11 failed hr=0x" << std::hex << uint32_t(hr) << std::dec << "\n";
+        return 31;
+    }
     if (!VerifyD3D11(device11.Get(), context11.Get(), opened, openedFence.Get())) return 32;
 
     std::cout << "PASS d3d12-shared-heap -> local-d3d12 -> d3d11 shared textures/fence\n";
