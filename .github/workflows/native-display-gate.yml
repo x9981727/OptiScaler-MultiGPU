@@ -22,23 +22,17 @@ jobs:
           repository: microsoft/Detours
           ref: e4bfd6b03e50de46b47abfbd1e46b384f0c5f833
           path: detours-source
-      - name: Prepare isolated complete-output FIFO and priority control
+      - name: Prepare isolated source and display timing experiment
         shell: pwsh
         run: |
-          python lab-ring/apply_reference_ring.py intel-reference
-          if ($LASTEXITCODE -ne 0) { throw 'Ring source anchors failed' }
-          python lab-native/apply_native_gate.py intel-reference
-          if ($LASTEXITCODE -ne 0) { throw 'Native source anchors failed' }
-          python lab-native/add_diagnostics.py intel-reference
-          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic source anchors failed' }
-          python lab-native/enable_owned_staging.py intel-reference
-          if ($LASTEXITCODE -ne 0) { throw 'Owned frame source anchors failed' }
-          python lab-native/refine_output_fence.py intel-reference
-          if ($LASTEXITCODE -ne 0) { throw 'Output release source anchors failed' }
-          python lab-native/select_output_mailbox.py intel-reference
-          if ($LASTEXITCODE -ne 0) { throw 'FIFO preparation failed' }
+          foreach ($script in @('lab-ring/apply_reference_ring.py','lab-native/apply_native_gate.py','lab-native/add_diagnostics.py','lab-native/enable_owned_staging.py','lab-native/refine_output_fence.py','lab-native/select_output_mailbox.py')) {
+            python $script intel-reference
+            if ($LASTEXITCODE -ne 0) { throw "Source preparation failed: $script" }
+          }
           python lab-native/enable_priority_scope.py intel-reference detours-source
           if ($LASTEXITCODE -ne 0) { throw 'Priority experiment preparation failed' }
+          python lab-native/enable_phase_control.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Phase trace preparation failed' }
           Copy-Item lab-native/stage-test.cpp intel-reference/samples/basic_sample_frame_generation/
           @'
           add_executable(native_stage_test stage-test.cpp)
@@ -70,16 +64,16 @@ jobs:
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NATIVE-GATE-MANIFEST.json "$out/NATIVE-GATE-MANIFEST.json"
           Copy-Item probe-build/stage-test-results.txt "$out/stage-test-results.txt"
           New-Item probe-build/source-review -ItemType Directory -Force | Out-Null
-          Copy-Item lab-native/NativeOutputMailbox.h,lab-native/NativeFrameStage.h,lab-native/SdkQueuePriorityScope.h,lab-native/enable_priority_scope.py,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/refine_output_fence.py,lab-native/select_output_mailbox.py,lab-native/stage-test.cpp probe-build/source-review/
+          Copy-Item lab-native/NativeOutputMailbox.h,lab-native/NativeFrameStage.h,lab-native/SdkQueuePriorityScope.h,lab-native/enable_priority_scope.py,lab-native/enable_phase_control.py,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/refine_output_fence.py,lab-native/select_output_mailbox.py,lab-native/stage-test.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeGate.h probe-build/source-review/NativeGate-compiled.h
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeFrameStage.h probe-build/source-review/NativeFrameStage-compiled.h
-          'Isolated native-output FIFO priority comparison. SDK HIGH->NORMAL only when explicitly requested during initialization; display queue priority checked by normal D3D12 API. No global/driver/security/game changes. Native labels can be unavailable. WARP validates copying only, no final game acceptance.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          'Isolated native-output phase comparison. Independent source status trace is included. No global, driver, security or installed game modifications. WARP validates copying only. Native labels may be unavailable; use packet/source traces and actual ETW display timestamps. No game acceptance or pixel-quality certification.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
           Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content probe-build/SHA256.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
-          name: XeFG-native-output-priority-prototype
+          name: XeFG-native-output-phase-prototype
           path: |
             probe-build/bin/Release/
             probe-build/source-review/
