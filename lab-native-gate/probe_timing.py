@@ -1,5 +1,5 @@
 from pathlib import Path
-import sys
+import sys,subprocess
 root=Path(sys.argv[1]); p=root/'basic_sample.cpp';s=p.read_text(encoding='utf-8-sig')
 def replace(text,old,new):
  if text.count(old)!=1:raise RuntimeError('Timing probe anchor: '+old[:100])
@@ -41,3 +41,4 @@ extern "C" void DumpSourceRecords(){
 }
 '''
 n.write_text(c,encoding='utf-8');print('Explicit source cadence records and frame-time hint control prepared.')
+subprocess.run([sys.executable,str(Path(__file__).with_name('precision.py')),str(root)],check=True)
