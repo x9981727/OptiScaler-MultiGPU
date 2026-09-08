@@ -15,22 +15,31 @@ jobs:
     steps:
       - name: Checkout experiment branch
         uses: actions/checkout@v4
-      - name: Checkout exact upstream WorkingScale implementation
-        uses: actions/checkout@v4
-        with:
-          repository: MatheusGViana/dlss-5-amd-project
-          ref: e58ff27a3d5ac86184875e01b317ff1463a247c1
-          path: upstream
-          fetch-depth: 1
-          lfs: false
+      - name: Checkout exact upstream into short long-path-enabled workspace
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $up='D:/u'
+          if (Test-Path $up) { Remove-Item $up -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $up | Out-Null
+          & git -C $up init
+          if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+          & git -C $up config core.longpaths true
+          & git -C $up remote add origin https://github.com/MatheusGViana/dlss-5-amd-project.git
+          & git -C $up -c core.longpaths=true fetch --no-tags --depth=1 origin e58ff27a3d5ac86184875e01b317ff1463a247c1
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned upstream fetch failed' }
+          & git -C $up -c core.longpaths=true checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned upstream checkout failed' }
+          $actual=(& git -C $up rev-parse HEAD).Trim()
+          if ($actual -ne 'e58ff27a3d5ac86184875e01b317ff1463a247c1') { throw "Wrong upstream commit: $actual" }
       - name: Verify pinned source and WorkingScale contract
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $actual=(git -C upstream rev-parse HEAD).Trim()
-          if ($actual -ne 'e58ff27a3d5ac86184875e01b317ff1463a247c1') { throw "Wrong upstream commit: $actual" }
-          $dx='upstream/OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
-          $cfg='upstream/OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/Config.cpp'
+          $up='D:/u'
+          $actual=(& git -C $up rev-parse HEAD).Trim()
+          $dx=Join-Path $up 'OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
+          $cfg=Join-Path $up 'OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/Config.cpp'
           if (!(Select-String -LiteralPath $dx -Pattern 'DlssNrWorkingScale' -Quiet)) { throw 'DX12 WorkingScale implementation missing' }
           if (!(Select-String -LiteralPath $dx -Pattern '0\.25f' -Quiet) -or !(Select-String -LiteralPath $dx -Pattern '2\.0f' -Quiet)) { throw 'Expected WorkingScale clamp missing' }
           if (!(Select-String -LiteralPath $cfg -Pattern 'WorkingScale' -Quiet)) { throw 'WorkingScale config binding missing' }
@@ -46,7 +55,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $root=(Resolve-Path 'upstream/OptiScaler-DLSSNR-PreSR-Multipass-main').Path
+          $root='D:/u/OptiScaler-DLSSNR-PreSR-Multipass-main'
           $vswhere="${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$vs) { throw 'MSVC x64 toolchain missing' }
@@ -69,11 +78,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $src=(Resolve-Path 'upstream/OptiScaler-DLSSNR-PreSR-Multipass-main').Path
+          $src='D:/u/OptiScaler-DLSSNR-PreSR-Multipass-main'
           $release=Join-Path $src 'x64/Release/a'
-          $static=(Resolve-Path 'upstream/package-amd-presr').Path
-          New-Item -ItemType Directory -Force -Path package,pacakge_dummy,package/presets,package/reports | Out-Null
-          Remove-Item package_dummy -Recurse -Force -ErrorAction SilentlyContinue
+          $static='D:/u/package-amd-presr'
+          New-Item -ItemType Directory -Force -Path package,package/presets,package/reports | Out-Null
           Copy-Item (Join-Path $release 'OptiScaler.dll') package/
           Copy-Item (Join-Path $release 'nvngx.dll_dlssnr.dll') package/
           Get-ChildItem $static -File -Filter '*.dll' | ForEach-Object { Copy-Item $_.FullName package/ -Force }
@@ -113,32 +121,25 @@ jobs:
           This is a manually tested performance/quality branch, NOT a final game DLL.
 
           Why this path:
-          - Your RX 9070 XT profiling shows Swin dominates the recovered Forward while Head is tiny.
+          - RX 9070 XT profiling shows Swin dominates the recovered Forward while Head is tiny.
           - Under the output-sensitive 1/32 control test, the isolated faster Head replacements made the complete Forward slower, so r7 drops Head replacement from the performance path.
-          - The pinned upstream source now implements DlssNr.WorkingScale. It changes the neural working raster and resamples its contribution, instead of changing the full-resolution base colour path.
+          - The pinned upstream source implements DlssNr.WorkingScale. It changes the neural working raster and resamples its contribution instead of changing the full-resolution base-colour raster.
 
-          Install for an existing working DLSSNR-on-AMD setup:
-          1. Back up your current OptiScaler.dll, nvngx.dll_dlssnr.dll and OptiScaler.ini.
-          2. Keep your existing dlssnr_on_amd_weights.bin. It is intentionally NOT duplicated in this ZIP.
-          3. Copy this package's DLLs over the matching files in your existing test installation.
-          4. Start with presets/WorkingScale_100_REFERENCE.ini copied as OptiScaler.ini. Confirm baseline operation.
-          5. Test 0.85, 0.75, 0.67, then 0.50. Use the same scene, render resolution, DLSS/NR settings and FPS cap state.
-          6. Compare GPU frame time, visible denoising/reconstruction detail, temporal stability, disocclusion behaviour and ghosting. 0.25 is only for diagnosis.
+          Install over an existing working DLSSNR-on-AMD test setup:
+          1. Back up current OptiScaler.dll, nvngx.dll_dlssnr.dll and OptiScaler.ini.
+          2. Keep the existing dlssnr_on_amd_weights.bin. It is intentionally NOT duplicated here.
+          3. Copy this package's DLLs into the existing test installation.
+          4. Start by copying presets/WorkingScale_100_REFERENCE.ini over OptiScaler.ini and confirm reference operation.
+          5. Then test 0.85, 0.75, 0.67 and 0.50 in the same scene/settings. 0.25 is diagnostic only.
+          6. Compare GPU frame time and visible reconstruction/denoising detail, temporal stability, disocclusion behaviour and ghosting.
 
-          WorkingScale meaning:
-          - 1.00: neural raster uses 100% width and height (reference).
-          - 0.85: 72.25% of reference neural pixels.
-          - 0.75: 56.25% of reference neural pixels.
-          - 0.67: 44.89% of reference neural pixels.
-          - 0.50: 25% of reference neural pixels.
-          - 0.25: 6.25% of reference neural pixels; diagnostic only.
-          Pixel ratios are geometric only; they are NOT promised speedups because resampling, fixed work and memory traffic remain.
+          Neural pixel area relative to 1.00:
+          1.00 = 100%; 0.85 = 72.25%; 0.75 = 56.25%; 0.67 = 44.89%; 0.50 = 25%; 0.25 = 6.25%.
+          These are geometric pixel counts, NOT promised speedups; resampling, fixed work and memory traffic remain.
 
-          Important:
-          - Do not delete dlssnr_on_amd_weights.bin.
-          - Do not mix performance comparisons across different WorkingScale values and call them byte-identical model tests; the neural working resolution is intentionally different.
-          - The pinned upstream commit is e58ff27a3d5ac86184875e01b317ff1463a247c1.
-          - This package does not claim NVIDIA-equivalent performance or final game-quality validation.
+          Do not delete dlssnr_on_amd_weights.bin. WorkingScale deliberately changes the neural work resolution, so different scales are not byte-identical model tests.
+          Pinned upstream commit: e58ff27a3d5ac86184875e01b317ff1463a247c1.
+          This package does not claim NVIDIA-equivalent performance or final game-quality validation.
           '@ | Set-Content package/README_R7.txt -Encoding utf8
           @{
             revision='r7-working-scale'
