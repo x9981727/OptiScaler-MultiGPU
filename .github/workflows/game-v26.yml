@@ -1,0 +1,111 @@
+name: XeFG v26 experimental game DLL and reversible installer
+on:
+  push:
+    branches: [test/xefg-game-pacing-v26]
+    paths: ['v26-*', 'v26/**', '.github/workflows/game-v26.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: game-v26-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify and expand exact reviewed source payload
+        shell: powershell
+        run: |
+          @'
+          from pathlib import Path
+          import base64,gzip,hashlib,json
+          names=[f'v26-payload.b64.part{i:02}' for i in range(4)]+['v26-payload.tail00','v26-payload.tail01']
+          data=base64.b64decode(''.join(Path(n).read_text().strip() for n in names),validate=True)
+          assert hashlib.sha256(data).hexdigest()=='f3e1e358f86403b091417ffe7d3a7841ce372c75da6c962e731339eedebe0806','payload integrity failed'
+          files=json.loads(gzip.decompress(data));root=Path('v26');root.mkdir(exist_ok=True)
+          for name,text in files.items():
+              assert Path(name).name==name
+              (root/name).write_text(text,encoding='utf-8',newline='\n')
+          print('Expanded',len(files),'reviewed source files')
+          '@ | Set-Content -Encoding UTF8 expand_v26.py
+          python expand_v26.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install pyyaml==6.0.2 pyinstaller==6.11.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test actual controller and reversible installer
+        shell: powershell
+        run: |
+          Push-Location v26
+          cmd /c "python -m unittest -v test_game > python-results.txt 2>&1"
+          $code=$LASTEXITCODE
+          Get-Content python-results.txt
+          Pop-Location
+          if ($code -ne 0) { exit $code }
+      - name: Build and run deadline and native swapchain contract tests
+        shell: powershell
+        run: |
+          msbuild v26\tests.vcxproj /p:Configuration=Release /p:Platform=x64 /p:TestName=test-pacing /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\v26\out\test-pacing.exe | Tee-Object v26\pacing-results.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild v26\tests.vcxproj /p:Configuration=Release /p:Platform=x64 /p:TestName=native-proxy-smoke /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\v26\out\native-proxy-smoke.exe | Tee-Object v26\proxy-results.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reconstruct pinned game baseline and retained GPU ownership tests
+        shell: powershell
+        run: |
+          python v26\build_base.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Integrate game-native output experiment and build Release x64
+        shell: powershell
+        run: |
+          python v26\apply_v26.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild upstream\OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build standalone Windows controller and installer
+        shell: powershell
+        run: |
+          python -m PyInstaller --clean --noconfirm --onefile --name Install-XeFG v26\install_game.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --clean --noconfirm --onefile --name AutoPacing v26\game_feedback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\Install-XeFG.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\AutoPacing.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/download-artifact@v4
+        with:
+          name: XeFG-Automatic-Feedback-Complete-Lab
+          run-id: 34195293242
+          github-token: ${{ github.token }}
+          path: prior-metrics
+      - name: Package real DLL, tools, license, provenance and complete readable changes
+        shell: powershell
+        run: |
+          python v26\package_game.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-XeFG-v26-GameTest
+          path: OptiScaler-XeFG-v26-GameTest.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: XeFG-v26-build-evidence
+          path: |
+            v26/*results.txt
+            v26/source-review/
+          if-no-files-found: warn
+          retention-days: 14
