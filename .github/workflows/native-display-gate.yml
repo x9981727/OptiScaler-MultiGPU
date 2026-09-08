@@ -6,6 +6,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: native-probe-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: windows-2022
@@ -22,7 +25,7 @@ jobs:
           repository: microsoft/Detours
           ref: e4bfd6b03e50de46b47abfbd1e46b384f0c5f833
           path: detours-source
-      - name: Prepare isolated source and display timing experiment
+      - name: Prepare isolated timing and measured GPU readiness experiment
         shell: pwsh
         run: |
           foreach ($script in @('lab-ring/apply_reference_ring.py','lab-native/apply_native_gate.py','lab-native/add_diagnostics.py','lab-native/enable_owned_staging.py','lab-native/refine_output_fence.py','lab-native/select_output_mailbox.py')) {
@@ -34,6 +37,8 @@ jobs:
           python lab-native/enable_phase_control.py intel-reference
           if ($LASTEXITCODE -ne 0) { throw 'Phase trace preparation failed' }
           Copy-Item lab-native/stage-test.cpp intel-reference/samples/basic_sample_frame_generation/
+          python lab-native/enable_gpu_phase.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'GPU timestamp phase preparation failed' }
           @'
           add_executable(native_stage_test stage-test.cpp)
           set_property(TARGET native_stage_test PROPERTY CXX_STANDARD 17)
@@ -46,14 +51,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Configuration failed' }
           cmake --build probe-build --config Release --parallel 2
           if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
-      - name: Verify owned color transfer bit-exactness on WARP
+      - name: Verify actual copy and GPU readiness helpers on WARP
         shell: pwsh
         timeout-minutes: 2
         run: |
           $test = Get-ChildItem probe-build -Recurse -Filter native_stage_test.exe | Select-Object -First 1
           if (-not $test) { throw 'Missing stage test' }
           & $test.FullName | Tee-Object -FilePath probe-build/stage-test-results.txt
-          if ($LASTEXITCODE -ne 0) { throw 'Owned-frame transfer test failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Copy/query regression failed' }
       - name: Retain actual sources and licenses
         shell: pwsh
         run: |
@@ -64,16 +69,15 @@ jobs:
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NATIVE-GATE-MANIFEST.json "$out/NATIVE-GATE-MANIFEST.json"
           Copy-Item probe-build/stage-test-results.txt "$out/stage-test-results.txt"
           New-Item probe-build/source-review -ItemType Directory -Force | Out-Null
-          Copy-Item lab-native/NativeOutputMailbox.h,lab-native/NativeFrameStage.h,lab-native/SdkQueuePriorityScope.h,lab-native/enable_priority_scope.py,lab-native/enable_phase_control.py,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/refine_output_fence.py,lab-native/select_output_mailbox.py,lab-native/stage-test.cpp probe-build/source-review/
-          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp probe-build/source-review/
-          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h probe-build/source-review/
+          Copy-Item lab-native/NativeOutputMailbox.h,lab-native/NativeFrameStage.h,lab-native/SdkQueuePriorityScope.h,lab-native/NativeGpuReadyProbe.h,lab-native/enable_gpu_phase.py,lab-native/enable_priority_scope.py,lab-native/enable_phase_control.py,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/refine_output_fence.py,lab-native/select_output_mailbox.py probe-build/source-review/
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp,intel-reference/samples/basic_sample_frame_generation/basic_sample.h,intel-reference/samples/basic_sample_frame_generation/stage-test.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeGate.h probe-build/source-review/NativeGate-compiled.h
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeFrameStage.h probe-build/source-review/NativeFrameStage-compiled.h
-          'Isolated native-output phase comparison. Independent source status trace is included. No global, driver, security or installed game modifications. WARP validates copying only. Native labels may be unavailable; use packet/source traces and actual ETW display timestamps. No game acceptance or pixel-quality certification.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          'Isolated automatic GPU-ready phase experiment. No global, driver, security or installed game changes. WARP validates copying and timestamp slot ownership only. Source status and actual display clocks must be compared separately. No game acceptance or pixel-quality certification.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
           Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content probe-build/SHA256.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
-          name: XeFG-native-output-phase-prototype
+          name: XeFG-gpu-readiness-phase-prototype
           path: |
             probe-build/bin/Release/
             probe-build/source-review/
