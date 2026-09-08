@@ -5,6 +5,7 @@
 #include <cstdint>
 #include "ipc_pipe.hpp"
 #include "transport_d3d12.hpp"
+#include "native_bridge/ledger.hpp"
 #include "native_bridge/wire.hpp"
 
 namespace nb::session {
