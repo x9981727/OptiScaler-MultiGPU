@@ -1,0 +1,53 @@
+name: Build isolated XeFG ring experiment
+on:
+  push:
+    branches: [test/xefg-physical-ring]
+    paths: [.github/workflows/physical-ring.yml, 'lab-ring/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-ring:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: intel/xess
+          ref: 207b703ad215da5b86dde04819a16277a96980aa
+          path: intel-reference
+      - name: Apply strictly bounded ring experiment
+        shell: pwsh
+        run: |
+          python lab-ring/apply_reference_ring.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Source contract checks failed' }
+      - name: Compile Windows Release
+        shell: pwsh
+        run: |
+          cmake -S intel-reference/samples/basic_sample_frame_generation -B reference-build -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Configuration failed' }
+          cmake --build reference-build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+      - name: Preserve scope, licenses and exact tested source
+        shell: pwsh
+        run: |
+          $out='reference-build/bin/Release'
+          Copy-Item intel-reference/LICENSE.txt "$out/INTEL-SDK-LICENSE.txt"
+          Copy-Item intel-reference/third-party-programs.txt "$out/third-party-programs.txt"
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/RING-MANIFEST.json "$out/RING-MANIFEST.json"
+          New-Item reference-build/source-review -ItemType Directory -Force | Out-Null
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp reference-build/source-review/
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h reference-build/source-review/
+          Copy-Item lab-ring/apply_reference_ring.py reference-build/source-review/
+          'Isolated experimental reference executable. Native XeLL and timing hints unchanged; four protected allocator/constant slots. NOT a game patch or Final version. No game acceptance was performed by CI.' | Set-Content -Encoding utf8 "$out/TEST-SCOPE.txt"
+          Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content -Encoding utf8 reference-build/reference-sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Intel-XeFG-physical-ring-experiment
+          path: |
+            reference-build/bin/Release/
+            reference-build/source-review/
+            reference-build/reference-sha256.txt
+          retention-days: 14
+          if-no-files-found: error
