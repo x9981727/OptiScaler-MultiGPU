@@ -8,6 +8,7 @@ s=replace(s,'extern "C" bool FastReferenceMode();','extern "C" bool FastReferenc
 s=replace(s,'FastReferenceMode() ? 3.574f : m_lastFrameTimeMS','ReferenceFrameHint(m_lastFrameTimeMS)')
 s=replace(s,'void BasicSample::OnUpdate()\n{','void BasicSample::OnUpdate()\n{\n    RecordSourceStart(m_frameCounter);')
 s=replace(s,'    if (m_lastPresentStatus.frameGenResult != XEFG_SWAPCHAIN_RESULT_SUCCESS)','    RecordSourceEnd(m_frameCounter,m_lastPresentStatus.framesPresented,static_cast<int>(m_lastPresentStatus.frameGenResult));\n    if (m_lastPresentStatus.frameGenResult != XEFG_SWAPCHAIN_RESULT_SUCCESS)')
+s=replace(s,'#include "basic_sample.h"','#include "basic_sample.h"\n#include <cstdio>\n#include <d3d12sdklayers.h>')
 p.write_text(s,encoding='utf-8')
 n=root/'native_gate.cpp';c=n.read_text(encoding='utf-8-sig')
 c=replace(c,'#include <algorithm>','#include <algorithm>\n#include <vector>\n#include <fstream>\n#include <iomanip>\n#include <cmath>')
@@ -41,5 +42,5 @@ extern "C" void DumpSourceRecords(){
 }
 '''
 n.write_text(c,encoding='utf-8');print('Explicit source cadence records and frame-time hint control prepared.')
-for step in ('precision.py','resource_gate.py','output_dma.py'):
+for step in ('precision.py','resource_gate.py','output_dma.py','queue_isolation.py'):
  subprocess.run([sys.executable,str(Path(__file__).with_name(step)),str(root)],check=True)
