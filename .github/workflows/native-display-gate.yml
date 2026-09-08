@@ -17,7 +17,7 @@ jobs:
           repository: intel/xess
           ref: 207b703ad215da5b86dde04819a16277a96980aa
           path: intel-reference
-      - name: Prepare isolated owned-output prototype without runtime replacement
+      - name: Prepare isolated complete-output FIFO
         shell: pwsh
         run: |
           python lab-ring/apply_reference_ring.py intel-reference
@@ -30,6 +30,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Owned frame source anchors failed' }
           python lab-native/refine_output_fence.py intel-reference
           if ($LASTEXITCODE -ne 0) { throw 'Output release source anchors failed' }
+          python lab-native/select_output_mailbox.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'FIFO preparation failed' }
           Copy-Item lab-native/stage-test.cpp intel-reference/samples/basic_sample_frame_generation/
           @'
           add_executable(native_stage_test stage-test.cpp)
@@ -51,7 +53,7 @@ jobs:
           if (-not $test) { throw 'Missing stage test' }
           & $test.FullName | Tee-Object -FilePath probe-build/stage-test-results.txt
           if ($LASTEXITCODE -ne 0) { throw 'Owned-frame transfer test failed' }
-      - name: Retain provenance, actual headers and licenses
+      - name: Retain actual sources and licenses
         shell: pwsh
         run: |
           $out='probe-build/bin/Release'
@@ -60,16 +62,16 @@ jobs:
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NATIVE-GATE-MANIFEST.json "$out/NATIVE-GATE-MANIFEST.json"
           Copy-Item probe-build/stage-test-results.txt "$out/stage-test-results.txt"
           New-Item probe-build/source-review -ItemType Directory -Force | Out-Null
-          Copy-Item lab-native/NativeGate.h,lab-native/NativeFrameStage.h,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/refine_output_fence.py,lab-native/stage-test.cpp probe-build/source-review/
+          Copy-Item lab-native/NativeOutputMailbox.h,lab-native/NativeFrameStage.h,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/refine_output_fence.py,lab-native/select_output_mailbox.py,lab-native/stage-test.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeGate.h probe-build/source-review/NativeGate-compiled.h
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeFrameStage.h probe-build/source-review/NativeFrameStage-compiled.h
-          'Isolated deadline-before-copy prototype. Uses existing system Direct3D runtime. No game DLL built or installed. WARP validates copying, not FPS or generated pixels. Resize/lifecycle game integration is not validated.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          'Isolated native-output FIFO. Acceptance is queued, actual Present happens on a consumer and errors propagate asynchronously. No game DLL built or installed. WARP tests copying only. Native SDK frame-type labels may not track the consumer; actual events and packet counts require reconciliation. Resize/game integration not validated.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
           Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content probe-build/SHA256.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
-          name: XeFG-owned-output-prototype
+          name: XeFG-native-output-fifo-prototype
           path: |
             probe-build/bin/Release/
             probe-build/source-review/
