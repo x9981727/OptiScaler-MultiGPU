@@ -1,0 +1,120 @@
+name: Build v26 RC3 window-thread hotfix
+on:
+  push:
+    branches: [fix/v26-rc3-window-thread]
+    paths: ['v26rc3/**', '.github/workflows/build-v26-rc3.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v26-rc3-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Reconstruct exact retained baseline
+        shell: powershell
+        run: |
+          python -m pip install pyyaml
+          if ($LASTEXITCODE -ne 0) { throw 'YAML preparation failed' }
+          @'
+          from pathlib import Path
+          import subprocess,yaml
+          root=Path.cwd()
+          w=yaml.safe_load((root/'.github/workflows/build-multigpu-unsigned.yml').read_text())
+          for step in w['jobs']['build']['steps']:
+              if step.get('name')=='Build Release':break
+              if 'run' not in step:continue
+              print('BASELINE:',step.get('name'),flush=True)
+              subprocess.run(['powershell','-NoLogo','-NoProfile','-NonInteractive','-Command','$ErrorActionPreference="Stop";\n'+step['run']],check=True)
+          '@ | Set-Content prepare-baseline.py -Encoding utf8
+          python prepare-baseline.py
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline reconstruction failed' }
+      - name: Apply RC2 then window-thread fix without rate changes
+        shell: pwsh
+        run: |
+          foreach ($script in @('scripts/apply-v24.py','scripts/apply-v25.py','v26/apply_game_pacing.py','v26/finalize_candidate.py','v26rc2/patch_rc2.py','v26rc3/patch_rc3.py')) {
+            python $script
+            if ($LASTEXITCODE -ne 0) { throw "Patch failed: $script" }
+          }
+          Copy-Item v26rc3/window-thread-test.cpp v26/window-thread-test.cpp
+          @'
+          from pathlib import Path
+          p=Path('v26/lifecycle-test.vcxproj').read_text()
+          for variant in ['old','new']:
+              text=p.replace('lifecycle-test.cpp','window-thread-test.cpp').replace('v26-lifecycle-test','window-'+variant)
+              text=text.replace('$(ProjectDir)obj\\','$(ProjectDir)obj-'+variant+'\\')
+              if variant=='old':text=text.replace('NOMINMAX;','TEST_RC2_NEGATIVE;NOMINMAX;')
+              Path('v26/window-'+variant+'.vcxproj').write_text(text,encoding='utf-8')
+          '@ | Set-Content make-window-projects.py -Encoding utf8
+          python make-window-projects.py
+          if ($LASTEXITCODE -ne 0) { throw 'Test project preparation failed' }
+      - name: Compile lifecycle and window-thread regression executables
+        shell: pwsh
+        run: |
+          foreach ($project in @('v26/lifecycle-test.vcxproj','v26/window-old.vcxproj','v26/window-new.vcxproj')) {
+            msbuild $project /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+            if ($LASTEXITCODE -ne 0) { throw "Test compilation failed: $project" }
+          }
+      - name: Reproduce RC2 failure and verify RC3 GUI behavior
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          @'
+          from pathlib import Path
+          import subprocess
+          for name in ['window-old','window-new','v26-lifecycle-test']:
+              p=subprocess.run([str(Path('v26/out',name+'.exe').resolve())],capture_output=True,text=True,errors='replace',timeout=40)
+              text=p.stdout+p.stderr
+              Path('v26/'+name+'-results.txt').write_text(text,encoding='utf-8')
+              print(text,flush=True)
+              if p.returncode:raise SystemExit('Failed '+name+' exit='+str(p.returncode))
+          '@ | Set-Content run-window-tests.py -Encoding utf8
+          python run-window-tests.py
+          if ($LASTEXITCODE -ne 0) { throw 'Window/lifecycle regression failed' }
+      - name: Compile actual OptiScaler Windows x64 DLL
+        shell: pwsh
+        run: |
+          msbuild upstream/OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Game DLL build failed' }
+      - name: Package checked candidate and exact source
+        shell: pwsh
+        run: |
+          $dll='upstream/x64/Release/a/OptiScaler.dll'
+          if (-not (Test-Path $dll)) { throw 'No actual game DLL produced' }
+          $text=[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path $dll)))
+          foreach ($marker in @('MultiGPU v26 RC3:','v26 RC3 output-pacing-attached','fixedRateClock=removed','resize-target-begin')) {
+            if (-not $text.Contains($marker)) { throw "Missing marker: $marker" }
+          }
+          $header=Get-Content v26/GameOutputPacing-compiled.h -Raw
+          if($header.Contains('nextDeadline') -or $header.Contains('fixedPeriodMs')) { throw 'Rate clock reintroduced' }
+          New-Item candidate/CopyToGame,candidate/Source,candidate/Tests -ItemType Directory -Force | Out-Null
+          Copy-Item $dll candidate/CopyToGame/dxgi.dll
+          @'
+          [OutputPacing]
+          Enabled=1
+          PhaseOffsetMs=-2.2
+          PhaseParity=0
+          Trace=1
+          '@ | Set-Content candidate/CopyToGame/XeFGPacing.ini -Encoding ascii
+          Copy-Item v26/INTEGRATION-MANIFEST.json candidate/
+          Copy-Item v26/*-results.txt candidate/Tests/
+          Copy-Item v26/GameOutputPacing-compiled.h,v26/WindowThreadWait.h,v26/PhaseOnlyDeadline.h candidate/Source/
+          Copy-Item v26rc3/* candidate/Source/
+          Copy-Item upstream/OptiScaler/framegen/xefg/XeFG_Dx12.cpp candidate/Source/
+          git archive --format=zip --output=candidate/Source/complete-build-recipe.zip HEAD
+          Get-ChildItem upstream -File | Where-Object { $_.Name -match '^LICENSE|^COPYING' } | Copy-Item -Destination candidate/
+          $hash=(Get-FileHash candidate/CopyToGame/dxgi.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          @{candidate='v26 RC3 window-thread hotfix';repo_commit=$env:GITHUB_SHA;upstream_commit=(git -C upstream rev-parse HEAD);run_id=$env:GITHUB_RUN_ID;dll_sha256=$hash;game_integration=$true;recurring_rate_clock=$false;rc2_message_deadlock_reproduced=$true;window_owner_tests_passed=$true;actual_user_game_test_passed=$false;perfect_pacing_claim=$false;zero_fps_cost_claim=$false;installed_on_user_computer=$false} | ConvertTo-Json | Set-Content candidate/BUILD-MANIFEST.json -Encoding utf8
+          "$hash  CopyToGame/dxgi.dll" | Set-Content candidate/SHA256.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-v26-RC3-window-thread-game-candidate
+          path: candidate/
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
