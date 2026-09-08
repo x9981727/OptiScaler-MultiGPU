@@ -113,7 +113,8 @@ jobs:
           Copy-Item $opt package/OptiScaler.dll
           Copy-Item $fwd package/nvngx.dll_dlssnr.dll
           foreach($name in @('dlssnr_amd_pass1.dll','dlssnr_amd_pass2.dll','dlssnr_amd_pass3.dll')) { Copy-Item (Join-Path $static $name) package/$name }
-          Copy-Item (Join-Path $static 'dlssnr_on_amd.ini') package/ -ErrorAction SilentlyContinue
+          $amdIni=Join-Path $static 'dlssnr_on_amd.ini'
+          if ((Test-Path $amdIni) -and (Get-Item $amdIni).Length -gt 0) { Copy-Item $amdIni package/ }
           Copy-Item (Join-Path $src 'OptiScaler.ini') package/OptiScaler.ini
           Copy-Item r7-source-gate.json,r7-patch-report.json,r7-fixup-report.json,r7-static-gate.json,r7-msbuild.log package/reports/
           Copy-Item r7-shader-bin package/reports/ -Recurse
@@ -141,21 +142,21 @@ jobs:
           ======================================
           Manual RX 9070 XT performance/quality experiment; not yet a validated final release.
 
-          Keep the existing dlssnr_on_amd_weights.bin. Test presets in order: 1.00, 0.85, 0.75, 0.67, 0.50; 0.25 is diagnostic only.
+          Keep the existing dlssnr_on_amd_weights.bin and your existing non-empty dlssnr_on_amd.ini if you use one. Test presets in order: 1.00, 0.85, 0.75, 0.67, 0.50; 0.25 is diagnostic only.
           For each preset, copy it over OptiScaler.ini and use the same game scene/settings. amd_presr.log must show base=... work=... with reduced work dimensions below scale 1.0.
           Compare GPU frame time/FPS plus NR detail, temporal stability, disocclusion edges and ghosting.
           Scale<1 intentionally changes the neural working raster, so byte-identical output to 1.0 is not expected.
           CI compiled the C++, all four HLSL shaders, and linked OptiScaler.dll; CI has no RX 9070 XT and did not execute the private HIP runtime.
           Pinned upstream: e58ff27a3d5ac86184875e01b317ff1463a247c1.
           '@ | Set-Content package/README_R7_AMD_WORKINGSCALE.txt -Encoding utf8
-          @{ revision='r7.1'; commit=$env:GITHUB_SHA; upstream='e58ff27a3d5ac86184875e01b317ff1463a247c1'; target='RX 9070 XT / gfx1201'; amd_working_scale_implemented=$true; scale1_gate_passed=$true; four_hlsl_compile_gate_passed=$true; optiscaler_release_link_passed=$true; target_gpu_tested_in_ci=$false; game_tested=$false; final_release=$false } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          @{ revision='r7.1-clean'; commit=$env:GITHUB_SHA; upstream='e58ff27a3d5ac86184875e01b317ff1463a247c1'; target='RX 9070 XT / gfx1201'; amd_working_scale_implemented=$true; scale1_gate_passed=$true; four_hlsl_compile_gate_passed=$true; optiscaler_release_link_passed=$true; empty_amd_ini_omitted=$true; target_gpu_tested_in_ci=$false; game_tested=$false; final_release=$false } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
           $root=(Resolve-Path package).Path
           Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object { $rel=$_.FullName.Substring($root.Length+1).Replace('\','/'); '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$rel } | Set-Content package/SHA256SUMS.txt -Encoding ascii
           Get-ChildItem package -Recurse -File | Select-Object FullName,Length
       - name: Upload ready-to-test r7 AMD overlay ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: RDNA4-r7.1-AMD-WorkingScale-Test
+          name: RDNA4-r7.1-CLEAN-AMD-WorkingScale-Test
           path: package/
           if-no-files-found: error
           compression-level: 9
