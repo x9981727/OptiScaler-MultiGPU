@@ -20,8 +20,12 @@ add_executable(native_bridge_tests tests/core_tests.cpp)
 target_link_libraries(native_bridge_tests PRIVATE native_bridge_core)
 add_executable(native_bridge_bench tests/benchmark.cpp)
 target_link_libraries(native_bridge_bench PRIVATE native_bridge_core)
+add_executable(native_bridge_fp16_tests tests/fp16_contract_tests.cpp)
+target_include_directories(native_bridge_fp16_tests PRIVATE tests)
+target_link_libraries(native_bridge_fp16_tests PRIVATE native_bridge_core)
 enable_testing()
 add_test(NAME native_bridge_core COMMAND native_bridge_tests)
+add_test(NAME fp16_hdr_contract COMMAND native_bridge_fp16_tests)
 if(WIN32)
   add_library(native_bridge_d3d12 STATIC
     windows/transport_d3d12.cpp
