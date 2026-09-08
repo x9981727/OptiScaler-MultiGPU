@@ -67,6 +67,11 @@ if(!$r1PatchCode){
  $r2PatchCode=$LASTEXITCODE
 } else {$r2PatchCode=1}
 if(!$r1PatchCode -and !$r2PatchCode){
+ python (Join-Path $root 'integrations/magpie/apply_xessfg_native_r3.py') $MagpieRoot 2>&1 |
+  Tee-Object (Join-Path $reports 'magpie-xessfg-native-r3.txt')
+ $r3PatchCode=$LASTEXITCODE
+} else {$r3PatchCode=1}
+if(!$r1PatchCode -and !$r2PatchCode -and !$r3PatchCode){
  python $exporter $MagpieRoot (Join-Path $dist 'patched-Magpie-NativeBridge-code-for-review.zip')
  if($LASTEXITCODE){throw 'Patched Magpie source export failed'}
 }
@@ -74,6 +79,7 @@ if($testCode){throw 'Windows tests failed'}
 if($opPatchCode){throw 'Pinned OptiScaler producer patch failed'}
 if($r1PatchCode){throw 'Pinned Magpie guidance patch failed'}
 if($r2PatchCode){throw 'Pinned Magpie runtime patch failed'}
+if($r3PatchCode){throw 'Pinned Magpie XeSSFG native guidance patch failed'}
 
 if(Test-Path (Join-Path $root 'build-magpie.ps1')) {
  & (Join-Path $root 'build-magpie.ps1') -MagpieRoot $MagpieRoot
@@ -98,5 +104,5 @@ if(Test-Path $opOut){
  Get-ChildItem $opOut -Recurse -File | Where-Object {$_.Extension -in @('.dll','.pdb','.ini','.bat')} |
   Copy-Item -Destination $dist -Force
 }
-'PASS: NativeBridge isolated tests + patched Magpie build + patched OptiScaler producer build. Real AMD/NVIDIA dual-GPU game validation is separate.' |
+'PASS: NativeBridge isolated tests + patched Magpie XeSSFG native depth/camera build + patched OptiScaler producer build. Real AMD/NVIDIA dual-GPU game validation is separate.' |
  Set-Content (Join-Path $dist 'BUILD_STATUS.txt')
