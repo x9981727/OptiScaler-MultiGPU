@@ -1,0 +1,152 @@
+ 	impl.motionUav11 = nullptr;
+ 	impl.motion11 = nullptr;
+ 	impl.motion12 = nullptr;
++	impl.depthUav11 = nullptr;
++	impl.depth11 = nullptr;
++	impl.depth12 = nullptr;
+ 	impl.zeroMotion12 = nullptr;
+ 	impl.flatDepth12 = nullptr;
+ 	impl.clearHeap12 = nullptr;
+ }
+ 
++static bool RecreateProxyForNativeFlags(
++	XeSSFGPresenter::Impl& impl, uint32_t initFlags) noexcept {
++	if (impl.initFlags == initFlags) return true;
++	if (impl.xefg) xefgSwapChainSetEnabled(impl.xefg, false);
++	impl.frameGenerationEnabled = false;
++	if (!WaitForQueue(impl)) return false;
++	ReleaseSizeDependentResources(impl);
++	impl.frameLatencyGate.Reset();
++	impl.frameLatencyWaitableObject.reset();
++	impl.swapChain = nullptr;
++	if (impl.xefg) {
++		const xefg_swapchain_result_t destroyed = xefgSwapChainDestroy(impl.xefg);
++		if (!XeFGSucceeded(destroyed)) {
++			LogXeFGResult("destroy before native-depth reinit failed", destroyed);
++			return false;
++		}
++		impl.xefg = nullptr;
++	}
++	xefg_swapchain_result_t result = xefgSwapChainD3D12CreateContext(
++		impl.device12.get(), &impl.xefg);
++	if (!XeFGSucceeded(result)) {
++		LogXeFGResult("native-depth context recreation failed", result);
++		return false;
++	}
++	xefgSwapChainSetLoggingCallback(
++		impl.xefg, XEFG_SWAPCHAIN_LOGGING_LEVEL_WARNING, XeFGLogCallback, nullptr);
++	result = xefgSwapChainSetLatencyReduction(impl.xefg, impl.xell);
++	if (!XeFGSucceeded(result)) {
++		LogXeFGResult("native-depth XeLL reconnection failed", result);
++		return false;
++	}
++	DXGI_SWAP_CHAIN_DESC1 desc{};
++	desc.Width = impl.width;
++	desc.Height = impl.height;
++	desc.Format = COLOR_FORMAT;
++	desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++	desc.BufferCount = BUFFER_COUNT;
++	desc.SampleDesc.Count = 1;
++	desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
++	desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
++	desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT |
++		(impl.allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
++	xefg_swapchain_d3d12_init_params_t params{};
++	params.initFlags = initFlags;
++	params.maxInterpolatedFrames = impl.multiplier - 1;
++	params.uiMode = XEFG_SWAPCHAIN_UI_MODE_NONE;
++	result = xefgSwapChainD3D12InitFromSwapChainDesc(
++		impl.xefg, impl.hwnd, &desc, nullptr, impl.queue12.get(), impl.factory, &params);
++	if (!XeFGSucceeded(result)) {
++		LogXeFGResult("native-depth proxy reinitialization failed", result);
++		return false;
++	}
++	result = xefgSwapChainD3D12GetSwapChainPtr(
++		impl.xefg, IID_PPV_ARGS(impl.swapChain.put()));
++	if (!XeFGSucceeded(result) || !impl.swapChain) {
++		LogXeFGResult("native-depth proxy retrieval failed", result);
++		return false;
++	}
++	impl.swapChain->SetMaximumFrameLatency(1);
++	impl.frameLatencyWaitableObject.reset(impl.swapChain->GetFrameLatencyWaitableObject());
++	if (!impl.frameLatencyWaitableObject) return false;
++	impl.factory->MakeWindowAssociation(impl.hwnd, DXGI_MWA_NO_ALT_ENTER);
++	result = xefgSwapChainSetNumInterpolatedFrames(impl.xefg, impl.multiplier - 1);
++	if (XeFGSucceeded(result)) result = xefgSwapChainSetEnabled(impl.xefg, true);
++	if (!XeFGSucceeded(result)) {
++		LogXeFGResult("native-depth proxy enable failed", result);
++		return false;
++	}
++	impl.initFlags = initFlags;
++	impl.frameGenerationEnabled = true;
++	impl.resetHistory = true;
++	impl.nativeGuidanceValid = false;
++	impl.externalMotionValid = false;
++	return CreateSizeDependentResources(impl);
++}
++
+ bool XeSSFGPresenter::_ResizeOverlaySurface() noexcept {
+ 	if (!_impl) {
+ 		return false;
+@@ -408,11 +527,13 @@
+ XeSSFGPresenter::XeSSFGPresenter(
+ 	XeSSFGVariant variant,
+ 	uint32_t requestedMultiplier,
+-	bool useExternalMotion
++	bool useExternalMotion,
++	bool useNativeGuidance
+ ) :
+ 	_variant(variant),
+ 	_requestedMultiplier(requestedMultiplier),
+ 	_useExternalMotion(useExternalMotion),
++	_useNativeGuidance(useNativeGuidance),
+ 	_initializationError(requestedMultiplier > 2 ?
+ 		ScalingError::XeSSMfgUnsupported : ScalingError::ScalingFailedGeneral) {}
+ XeSSFGPresenter::~XeSSFGPresenter() noexcept = default;
+@@ -440,6 +561,9 @@
+ 	impl->width = static_cast<uint32_t>(size.cx);
+ 	impl->height = static_cast<uint32_t>(size.cy);
+ 	impl->externalMotionEnabled = _useExternalMotion;
++	impl->nativeGuidanceEnabled = _useNativeGuidance;
++	impl->allowTearing = _deviceResources->IsTearingSupported() &&
++		ScalingWindow::Get().Options().isVRREnabled;
+ 
+ 	HRESULT hr = D3D12CreateDevice(
+ 		_deviceResources->GetGraphicsAdapter(), D3D_FEATURE_LEVEL_11_0,
+@@ -558,6 +682,7 @@
+ 		(_deviceResources->IsTearingSupported() && ScalingWindow::Get().Options().isVRREnabled ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+ 
+ 	xefg_swapchain_d3d12_init_params_t initParams{};
++	initParams.initFlags = XEFG_SWAPCHAIN_INIT_FLAG_NONE;
+ 	initParams.maxInterpolatedFrames = interpolatedFrames;
+ 	initParams.uiMode = XEFG_SWAPCHAIN_UI_MODE_NONE;
+ 	result = xefgSwapChainD3D12InitFromSwapChainDesc(
+@@ -593,6 +718,7 @@
+ 		return false;
+ 	}
+ 	impl->frameGenerationEnabled = true;
++	impl->initFlags = initParams.initFlags;
+ 
+ 	if (!CreateSizeDependentResources(*impl)) {
+ 		return false;
+@@ -604,13 +730,28 @@
+ 		return false;
+ 	}
+ 	Logger::Get().Info(fmt::format(
+-		"XeSSFG initialized: {}x{}, multiplier={}x, motion={}, flat depth, "
++		"XeSSFG initialized: {}x{}, multiplier={}x, motion={}, nativeGuidance={}, "
+ 		"XeLL enabled, independent UI layer",
+ 		_impl->width, _impl->height, _impl->multiplier,
+-		_impl->externalMotionEnabled ? "external optical flow" : "Zero-MV"));
++		_impl->externalMotionEnabled ? "external" : "Zero-MV",
++		_impl->nativeGuidanceEnabled ? "enabled" : "disabled"));
+ 	return true;
+ }
+ 
++static void BuildNativeViewMatrix(const nb::Camera& camera, float out[16]) noexcept {
++	const float* r = camera.right;
++	const float* u = camera.up;
++	const float* f = camera.forward;
++	const float* p = camera.position;
++	out[0]=r[0]; out[1]=u[0]; out[2]=f[0]; out[3]=0.0f;
++	out[4]=r[1]; out[5]=u[1]; out[6]=f[1]; out[7]=0.0f;
