@@ -189,15 +189,32 @@ bool NativeBridgeFrameSource::_Handshake() noexcept {
         .requireDifferentAdapters = true
     };
     _captureSequence = _generation;
-    _output.copy_from(_local.Textures11()[0].Get());
     return true;
 }
 
-bool NativeBridgeFrameSource::_CreateConfidenceTexture() noexcept {
+bool NativeBridgeFrameSource::_CreatePublishedTextures() noexcept {
     if (!_extent.width || !_extent.height) return false;
     const size_t pixels = size_t(_extent.width) * size_t(_extent.height);
     if (pixels > size_t(nb::kMaxDimension) * size_t(nb::kMaxDimension)) return false;
     try {
+        ID3D11Device5* device = _deviceResources->GetD3DDevice();
+        for (size_t i = 0; i < 3; ++i) {
+            D3D11_TEXTURE2D_DESC desc{};
+            _local.Textures11()[i]->GetDesc(&desc);
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.CPUAccessFlags = 0;
+            desc.MiscFlags = 0;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            ID3D11Texture2D** target = i == 0 ? _output.put() :
+                i == 1 ? _depth.put() : _motion.put();
+            const HRESULT hr = device->CreateTexture2D(&desc, nullptr, target);
+            if (FAILED(hr)) {
+                _captureErrorContext = "NativeBridge published texture";
+                _captureErrorCode = hr;
+                return false;
+            }
+        }
+
         std::vector<uint8_t> confidence(pixels, 0xff);
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = _extent.width;
@@ -211,8 +228,7 @@ bool NativeBridgeFrameSource::_CreateConfidenceTexture() noexcept {
         D3D11_SUBRESOURCE_DATA data{};
         data.pSysMem = confidence.data();
         data.SysMemPitch = _extent.width;
-        const HRESULT hr = _deviceResources->GetD3DDevice()->CreateTexture2D(
-            &desc, &data, _confidence.put());
+        const HRESULT hr = device->CreateTexture2D(&desc, &data, _confidence.put());
         if (FAILED(hr)) {
             _captureErrorContext = "NativeBridge confidence texture";
             _captureErrorCode = hr;
@@ -220,7 +236,7 @@ bool NativeBridgeFrameSource::_CreateConfidenceTexture() noexcept {
         }
         return true;
     } catch (...) {
-        _captureErrorContext = "NativeBridge confidence allocation";
+        _captureErrorContext = "NativeBridge published texture allocation";
         _captureErrorCode = E_OUTOFMEMORY;
         return false;
     }
@@ -233,7 +249,7 @@ bool NativeBridgeFrameSource::_Initialize() noexcept {
         _captureErrorCode = HRESULT_FROM_WIN32(GetLastError());
         return false;
     }
-    if (!_Handshake() || !_CreateConfidenceTexture()) return false;
+    if (!_Handshake() || !_CreatePublishedTextures()) return false;
     Logger::Get().Info(fmt::format(
         "NativeBridge connected: session={} generation={} viewport={} size={}x{} renderLuid={:08X}:{:08X} processingLuid={:08X}:{:08X}",
         _session, _generation, _viewport, _extent.width, _extent.height,
@@ -388,7 +404,9 @@ FrameSourceState NativeBridgeFrameSource::_Update() noexcept {
         return FrameSourceState::Error;
     }
 
-    HRESULT hr = _allocator12->Reset();
+    HRESULT hr = S_OK;
+    if (_lastLocalSerial) hr = _local.WaitConsumed(_queue12.Get(), _lastLocalSerial);
+    if (SUCCEEDED(hr)) hr = _allocator12->Reset();
     if (SUCCEEDED(hr)) hr = _list12->Reset(_allocator12.Get(), nullptr);
     const std::array<D3D12_RESOURCE_STATES, 3> states{
         D3D12_RESOURCE_STATE_COMMON,
@@ -408,15 +426,25 @@ FrameSourceState NativeBridgeFrameSource::_Update() noexcept {
     ID3D12CommandList* lists[]{_list12.Get()};
     _queue12->ExecuteCommandLists(1, lists);
     hr = _consumer.SignalDone(_queue12.Get(), frame.token.slot, frame.token.serial);
-    if (SUCCEEDED(hr)) hr = _local.Signal(_queue12.Get(), frame.token.serial);
-    if (SUCCEEDED(hr)) hr = _deviceResources->GetD3DDC()->Wait(
-        _local.Fence11(), frame.token.serial);
+    if (SUCCEEDED(hr)) hr = _local.SignalReady(_queue12.Get(), frame.token.serial);
+    ID3D11DeviceContext4* d3dDC = _deviceResources->GetD3DDC();
+    if (SUCCEEDED(hr)) hr = d3dDC->Wait(_local.ReadyFence11(), frame.token.serial);
+    if (SUCCEEDED(hr)) {
+        d3dDC->CopyResource(_output.get(), _local.Textures11()[0].Get());
+        d3dDC->CopyResource(_depth.get(), _local.Textures11()[1].Get());
+        d3dDC->CopyResource(_motion.get(), _local.Textures11()[2].Get());
+        hr = d3dDC->Signal(_local.ConsumedFence11(), frame.token.serial);
+        // D3D12 may already have queued the next WaitConsumed. Submit the
+        // reverse fence promptly so neither API can deadlock on batching.
+        d3dDC->Flush();
+    }
     if (FAILED(hr)) {
         _captureErrorContext = "NativeBridge consumer synchronization";
         _captureErrorCode = hr;
         return FrameSourceState::Error;
     }
 
+    _lastLocalSerial = frame.token.serial;
     _currentPacket = frame.packet;
     _currentSerial = frame.token.serial;
     _currentReset = frame.historyReset;
@@ -431,19 +459,20 @@ FrameSourceState NativeBridgeFrameSource::_Update() noexcept {
 bool NativeBridgeFrameSource::GetNativeGuidance(
     FrameGuidanceFrameId frameId,
     FrameGuidanceView& output) const noexcept {
-    if (!_currentValid || !_confidence || !_local.Fence11() || !frameId) return false;
+    if (!_currentValid || !_depth || !_motion || !_confidence || !frameId) return false;
     const FrameGuidanceExtent extent{_extent.width, _extent.height};
     const FrameGuidanceRegion region = FrameGuidanceRegion::Full(extent);
 
     auto fill = [&](FrameGuidanceResource& resource, ID3D11Texture2D* texture,
-                    DXGI_FORMAT format, bool native, bool synchronized) {
+                    DXGI_FORMAT format, bool native) {
         resource.texture = texture;
         resource.format = format;
         resource.metadata.frameId = frameId;
         resource.metadata.sourceExtent = extent;
         resource.metadata.validRegion = region;
-        resource.metadata.sync = synchronized ?
-            FrameGuidanceSyncPoint{_local.Fence11(), _currentSerial} : FrameGuidanceSyncPoint{};
+        // Published textures are copied on Renderer's immediate D3D11 context,
+        // so no external producer fence is required by FrameGuidanceService.
+        resource.metadata.sync = {};
         resource.metadata.resetReason = _currentReset ?
             FrameGuidanceResetReason::CaptureInterrupted : FrameGuidanceResetReason::None;
         resource.metadata.valid = true;
@@ -454,9 +483,9 @@ bool NativeBridgeFrameSource::GetNativeGuidance(
     };
 
     FrameGuidanceView view{};
-    fill(view.depth, _local.Textures11()[1].Get(), DXGI_FORMAT_R32_FLOAT, true, true);
-    fill(view.motion, _local.Textures11()[2].Get(), DXGI_FORMAT_R16G16_FLOAT, true, true);
-    fill(view.confidence, _confidence.get(), DXGI_FORMAT_R8_UNORM, false, false);
+    fill(view.depth, _depth.get(), DXGI_FORMAT_R32_FLOAT, true);
+    fill(view.motion, _motion.get(), DXGI_FORMAT_R16G16_FLOAT, true);
+    fill(view.confidence, _confidence.get(), DXGI_FORMAT_R8_UNORM, false);
     view.motionDirection = FrameGuidanceMotionDirection::CurrentToPrevious;
     view.motionUnit = FrameGuidanceMotionUnit::SourcePixels;
     view.requiresHistoryReset = _currentReset;
