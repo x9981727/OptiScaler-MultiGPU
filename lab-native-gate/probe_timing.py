@@ -41,5 +41,5 @@ extern "C" void DumpSourceRecords(){
 }
 '''
 n.write_text(c,encoding='utf-8');print('Explicit source cadence records and frame-time hint control prepared.')
-for step in ('precision.py','resource_gate.py'):
+for step in ('precision.py','resource_gate.py','output_dma.py'):
  subprocess.run([sys.executable,str(Path(__file__).with_name(step)),str(root)],check=True)
