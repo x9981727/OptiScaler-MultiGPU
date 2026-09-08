@@ -38,6 +38,7 @@ int run(IDXGIAdapter1* adapter){
     const HRESULT listen=producer.Listen(producerDevice.Get(),pc);
     if(listen==DXGI_ERROR_UNSUPPORTED || listen==E_NOTIMPL)return 77;
     check(SUCCEEDED(listen),"producer listen");
+    check(producer.Accept(20)==HRESULT_FROM_WIN32(ERROR_TIMEOUT),"accept timeout");
 
     HRESULT acceptHr=E_PENDING;
     std::thread acceptThread([&]{acceptHr=producer.Accept(5000);});
@@ -46,8 +47,8 @@ int run(IDXGIAdapter1* adapter){
     cc.instance=instance;cc.viewport=viewport;cc.colorFormat=nb::Format::Rgba8;cc.requireDifferentAdapters=false;
     const HRESULT connect=consumer.Connect(GetCurrentProcessId(),consumerDevice.Get(),cc,5000);
     acceptThread.join();
-    check(SUCCEEDED(connect),"consumer connect");
-    check(SUCCEEDED(acceptHr),"producer accept");
+    check(SUCCEEDED(connect),"consumer connect after producer timeout");
+    check(SUCCEEDED(acceptHr),"producer accept after timeout");
     check(producer.Connected()&&consumer.Connected(),"connected state");
     check(producer.PeerPid()==GetCurrentProcessId()&&consumer.PeerPid()==GetCurrentProcessId(),"authenticated peer pid");
     check(producer.GetPolicy().session==session&&consumer.GetPolicy().generation==generation,"session policy");
@@ -57,7 +58,7 @@ int run(IDXGIAdapter1* adapter){
     nb::Token timedToken{};nb::Packet timedPacket{};
     const HRESULT timeout=consumer.ReceiveFrame(timedToken,timedPacket,now_ns(),20);
     check(timeout==HRESULT_FROM_WIN32(ERROR_TIMEOUT),"idle receive timeout");
-    check(consumer.Connected(),"timeout preserves authenticated connection");
+    check(consumer.Connected(),"receive timeout preserves authenticated connection");
 
     auto packet=test::packet(9);
     packet.key={session,generation,9,viewport};packet.previousFrame=8;packet.timestampNs=now_ns();
@@ -79,11 +80,10 @@ int run(IDXGIAdapter1* adapter){
     check(SUCCEEDED(consumer.SendRelease(token,5000)),"consumer send release");
     nb::Token released{};
     check(SUCCEEDED(producer.ReceiveRelease(released,5000))&&released==token,"producer receive release");
-
     check(SUCCEEDED(producer.SendStop(5000)),"producer send stop");
     check(SUCCEEDED(consumer.ReceiveStop(5000)),"consumer receive stop");
     consumer.Close();producer.Close();
-    std::cout<<"PASS runtime session: auth/hello/handle duplication/frame/camera/release/stop/timeout recovery\n";
+    std::cout<<"PASS runtime session: accept/receive timeout recovery, auth, handles, frame/camera/release/stop\n";
     return 0;
 }
 }
