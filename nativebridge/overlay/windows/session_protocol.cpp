@@ -22,11 +22,13 @@ bool validAdapter(AdapterId a){return a.low!=0 || a.high!=0;}
 bool allZero(const std::byte* begin,const std::byte* end){return std::all_of(begin,end,[](std::byte b){return b==std::byte{};});}
 }
 Result MakeHelloMessage(const Hello& h, ipc::Message& out) noexcept {
-    if((h.role!=Role::ConsumerRequest && h.role!=Role::ProducerAccept) || !validAdapter(h.processingAdapter) ||
-       !valid_color_format(h.colorFormat)) return Result::Values;
+    if((h.role!=Role::ConsumerRequest && h.role!=Role::ProducerAccept) || !validAdapter(h.processingAdapter))
+        return Result::Values;
     if(h.role==Role::ConsumerRequest) {
-        if(h.session || h.generation || validAdapter(h.renderAdapter)) return Result::Values;
-    } else if(!h.session || !h.generation || !validAdapter(h.renderAdapter) || !valid_extent(h.extent) || h.viewport==AnyViewport)
+        if(h.session || h.generation || validAdapter(h.renderAdapter) ||
+           (h.colorFormat!=Format::Unknown && !valid_color_format(h.colorFormat))) return Result::Values;
+    } else if(!h.session || !h.generation || !validAdapter(h.renderAdapter) || !valid_extent(h.extent) ||
+              h.viewport==AnyViewport || !valid_color_format(h.colorFormat))
         return Result::Values;
     ipc::Message m{};m.kind=ipc::Kind::Hello;m.length=uint32_t(HelloBytes);Writer w{m.payload.data()};
     w.u32(HelloMagic);w.u32(ProtocolVersion);w.u32(uint32_t(h.role));w.u32(h.flags);
