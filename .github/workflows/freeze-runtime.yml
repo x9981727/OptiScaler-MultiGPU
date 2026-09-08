@@ -1,0 +1,33 @@
+name: Freeze verified 0.9.4 runtime dependencies
+on:
+  push:
+    branches: ['package/6600xt-runtime-freeze-20260908']
+    paths: ['.github/workflows/freeze-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify exact official dependency archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/optiscaler/OptiScaler/releases/download/v0.9.4/Optiscaler_0.9.4-final.20260718._MM.7z'
+          Invoke-WebRequest -Uri $url -OutFile official.7z
+          $hash = (Get-FileHash official.7z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '575cb4df866116093df75af607e37fd70e10f5163e0f23fd5c804142e80ef0ad') { throw 'Official archive hash mismatch' }
+          & 'C:\Program Files\7-Zip\7z.exe' x official.7z '-oruntime' -y
+          if ($LASTEXITCODE -ne 0) { throw 'Archive extraction failed' }
+          $fake = (Get-FileHash runtime/fakenvapi.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($fake -ne '373e73dc06e2d66e90083fde3bc99ef5c1ed0bef98d1f7eda56c8b073269c3f1') { throw 'Fakenvapi hash mismatch' }
+          @{ kind='unchanged_official_runtime_dependencies_not_a_game_release'; source=$url; sha256=$hash; custom_dll_included=$false; user_settings_included=$false; game_files_included=$false } | ConvertTo-Json | Set-Content runtime/RUNTIME-SOURCE.json -Encoding utf8
+          Get-ChildItem runtime -Recurse -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$_.FullName.Substring((Resolve-Path runtime).Path.Length+1) } | Set-Content runtime/RUNTIME-SHA256.txt -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-094-checksummed-official-runtime
+          path: runtime/
+          if-no-files-found: error
+          retention-days: 7
