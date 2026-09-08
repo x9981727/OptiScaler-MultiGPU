@@ -1,0 +1,161 @@
+name: RDNA4 r6.2 neural-contribution test
+on:
+  push:
+    branches: [dlssnr-rdna4-r62-neural-gain]
+    paths: ['rdna4/control_r62/**', '.github/workflows/rdna4-r62.yml']
+permissions:
+  contents: read
+concurrency:
+  group: rdna4-r62-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compilation tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Rebuild exactly the already GPU-tested r4 binary
+        run: |
+          python rdna4/layer_r4/build_layer.py
+          echo '62c8ecf66e4290ffbe22230a376b475ef482807fe05c46b957457bff5826cffe  rdna4/layer_r4/build/head_r4_gfx1201.hsaco' | sha256sum -c -
+      - name: Prepare inherited full-plan implementation
+        run: |
+          python rdna4/forward_r5/prepare_r52.py
+          python rdna4/forward_r5/build_support.py
+          python rdna4/forward_r5/test_r52_build.py
+          python rdna4/autolab/prepare_autolab.py
+          python rdna4/autolab_r61/prepare_r61.py
+      - name: Test numerical, measurement and bounded-control policies
+        run: |
+          python rdna4/autolab/run_cpu_lab.py
+          python rdna4/autolab_r61/test_measurement.py
+          python rdna4/control_r62/test_and_audit.py
+          python rdna4/control_r62/prepare_r62.py
+      - name: Save generated sources and verifiable reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r62-build-inputs
+          path: |
+            rdna4/layer_r4/build/head_r4_gfx1201.hsaco
+            rdna4/layer_r4/build/head_r4.isa.txt
+            rdna4/layer_r4/build/compile-report.json
+            rdna4/layer_r4/candidate_hash.hpp
+            rdna4/forward_r5/forward_r62.cpp
+            rdna4/forward_r5/plan_core.hpp
+            rdna4/forward_r5/r52_original_plan_core.hpp
+            rdna4/forward_r5/deps/
+            rdna4/forward_r5/build/*.json
+            rdna4/forward_r5/build/fixture-*.zip
+            rdna4/autolab/reports/*.json
+            rdna4/autolab_r61/reports/*.json
+            rdna4/control_r62/experiment.hpp
+            rdna4/control_r62/reports/*.json
+          if-no-files-found: error
+          retention-days: 14
+  windows:
+    needs: linux
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDNA4-r62-build-inputs
+          path: device
+      - name: Compile actual Windows x64 r6.2 executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package,package/reports | Out-Null
+          Copy-Item device/layer_r4/candidate_hash.hpp rdna4/layer_r4/
+          Copy-Item device/forward_r5/deps rdna4/forward_r5/ -Recurse
+          Copy-Item device/forward_r5/forward_r62.cpp,device/forward_r5/plan_core.hpp,device/forward_r5/r52_original_plan_core.hpp rdna4/forward_r5/
+          Copy-Item device/control_r62/experiment.hpp rdna4/control_r62/
+          $vswhere="${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) {throw 'MSVC x64 unavailable'}
+          $vcvars=Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          @('@echo off',('call "'+$vcvars+'"'),'if errorlevel 1 exit /b 1',
+            'cl /nologo /O2 /MT /c /TC rdna4\forward_r5\deps\puff.c /Fo:package\puff.obj','if errorlevel 1 exit /b 1',
+            'cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\forward_r5\forward_r62.cpp package\puff.obj /Fe:package\rdna4-r62-test.exe /Fo:package\forward_r62.obj','exit /b %errorlevel%') | Set-Content build-r62.cmd -Encoding ascii
+          & cmd /d /c build-r62.cmd
+          if ($LASTEXITCODE -ne 0) {throw 'r6.2 compilation failed'}
+      - name: Execute EXE CPU tests, ZIP modes and rejected input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($mode in @('stored','deflated')) {
+            & ./package/rdna4-r62-test.exe --cpu-self-test --fixture "device/forward_r5/build/fixture-$mode.zip" --output "package/reports/ci-$mode.json"
+            if ($LASTEXITCODE -ne 0) {throw "CPU tests failed: $mode"}
+            $r=Get-Content "package/reports/ci-$mode.json" -Raw | ConvertFrom-Json
+            if ($r.gpu_attempted -or !$r.cpu_zip_fixture_passed -or $r.r62_control_policy_checks -lt 700 -or $r.delivery_revision -ne 'r6.2') {throw 'Incorrect CPU validation status'}
+            Copy-Item rdna4-r62-console.txt "package/reports/ci-$mode-console.txt"
+          }
+          & ./package/rdna4-r62-test.exe --output package/reports/ci-rejected-input.json --unsupported-option
+          if ($LASTEXITCODE -eq 0) {throw 'Invalid CLI was accepted'}
+          $r=Get-Content package/reports/ci-rejected-input.json -Raw | ConvertFrom-Json
+          if ($r.status -ne 'failed' -or $r.gpu_attempted -or !$r.diagnostics) {throw 'Error diagnostics failed'}
+          Copy-Item rdna4-r62-console.txt package/reports/ci-rejected-input-console.txt
+          exit 0
+      - name: Package executable, tested sources, validation status and hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package/source/forward_r5,package/source/layer_r4,package/source/tests,package/source/autolab,package/source/autolab_r61,package/source/control_r62,package/Licenses,package/reports/forward,package/reports/autolab,package/reports/r61,package/reports/r62 | Out-Null
+          Copy-Item device/layer_r4/build/head_r4_gfx1201.hsaco package/
+          Copy-Item device/layer_r4/build/compile-report.json,device/layer_r4/build/head_r4.isa.txt package/reports/
+          Copy-Item device/forward_r5/build/*.json package/reports/forward/
+          Copy-Item device/autolab/reports/*.json package/reports/autolab/
+          Copy-Item device/autolab_r61/reports/*.json package/reports/r61/
+          Copy-Item device/control_r62/reports/*.json package/reports/r62/
+          Copy-Item rdna4/control_r62/README_zh-TW.md,rdna4/control_r62/RUN_R62.cmd package/
+          Copy-Item rdna4/forward_r5/*.cpp,rdna4/forward_r5/*.hpp,rdna4/forward_r5/*.py package/source/forward_r5/
+          Copy-Item rdna4/forward_r5/deps package/source/forward_r5/ -Recurse
+          Copy-Item rdna4/layer_r4/head_direct.cl,rdna4/layer_r4/head_contract.hpp,rdna4/layer_r4/candidate_hash.hpp,rdna4/layer_r4/build_layer.py package/source/layer_r4/
+          Copy-Item rdna4/tests/linear_test.cpp package/source/tests/
+          Copy-Item rdna4/autolab/*.hpp,rdna4/autolab/*.py,rdna4/autolab/*.cpp package/source/autolab/
+          Copy-Item rdna4/autolab_r61/*.hpp,rdna4/autolab_r61/*.py,rdna4/autolab_r61/*.cpp package/source/autolab_r61/ -ErrorAction SilentlyContinue
+          Copy-Item rdna4/control_r62/*.hpp,rdna4/control_r62/*.py package/source/control_r62/
+          Copy-Item .github/workflows/rdna4-r62.yml package/source/
+          Copy-Item rdna4/layer_r4/LICENSE.txt package/Licenses/INDEPENDENT_SOURCE_MIT.txt
+          Copy-Item rdna4/forward_r5/deps/JSON_LICENSE.MIT package/Licenses/
+          Copy-Item rdna4/forward_r5/deps/puff.h package/Licenses/PUFF_LICENSE_AND_HEADER.txt
+          Remove-Item package/*.obj -ErrorAction SilentlyContinue
+          @{
+            revision='r6.2'
+            repository='x9981727/OptiScaler-MultiGPU'
+            branch='dlssnr-rdna4-r62-neural-gain'
+            commit=$env:GITHUB_SHA
+            run_id=$env:GITHUB_RUN_ID
+            windows_exe_compiled=$true
+            cpu_and_zip_tests_passed=$true
+            static_scalar136_opcode_gate_passed=$true
+            inherited_gpu_binary_unchanged=$true
+            experimental_in_memory_final_scalar_changes=@(0,0.03125,0.125,1)
+            original_checkpoint_files_modified=$false
+            full_original_checkpoint_read_in_ci=$false
+            gpu_experiment_executed_in_ci=$false
+            new_swin_kernel_implemented=$false
+            game_tested=$false
+            game_release_approved=$false
+            performance_improvement_claimed=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root=(Resolve-Path package).Path
+          Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative=$_.FullName.Substring($root.Length+1).Replace('\','/')
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$relative
+          } | Set-Content PACKAGE_SHA256SUMS.txt -Encoding ascii
+          Move-Item PACKAGE_SHA256SUMS.txt package/SHA256SUMS.txt
+          Get-ChildItem package -Recurse -File | Select-Object FullName,Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r6.2-Neural-Contribution
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
