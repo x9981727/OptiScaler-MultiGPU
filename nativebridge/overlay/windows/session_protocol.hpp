@@ -9,30 +9,26 @@
 #include "native_bridge/wire.hpp"
 
 namespace nb::session {
-inline constexpr uint32_t HelloMagic = 0x3248424e; // NBH2
-inline constexpr uint32_t HandleMagic = 0x324d424e; // NBM2
+inline constexpr uint32_t HelloMagic = 0x3248424e;
+inline constexpr uint32_t HandleMagic = 0x324d424e;
 inline constexpr uint32_t ProtocolVersion = 1;
 inline constexpr size_t HelloBytes = 80;
 inline constexpr size_t HandleBytes = 112;
+inline constexpr uint64_t AnyViewport = ~uint64_t{0};
 
 enum class Role : uint32_t { ConsumerRequest = 1, ProducerAccept = 2 };
 struct Hello {
-    Role role{};
-    uint32_t flags{};
+    Role role{}; uint32_t flags{};
     uint64_t session{}, generation{}, viewport{};
     AdapterId renderAdapter{}, processingAdapter{};
-    Extent extent{};
-    Format colorFormat{Format::Rgba8};
+    Extent extent{}; Format colorFormat{Format::Rgba8};
 };
 struct HandleSet {
     uint64_t session{}, generation{};
     AdapterId renderAdapter{}, processingAdapter{};
-    Extent extent{};
-    Format colorFormat{Format::Rgba8};
-    uint64_t heap{};
-    std::array<uint64_t,kSlotCount> ready{}, done{};
+    Extent extent{}; Format colorFormat{Format::Rgba8};
+    uint64_t heap{}; std::array<uint64_t,kSlotCount> ready{}, done{};
 };
-
 enum class Result { Ok, Kind, Length, Header, Reserved, Values, Wire };
 Result MakeHelloMessage(const Hello&, ipc::Message&) noexcept;
 Result ParseHelloMessage(const ipc::Message&, Hello&) noexcept;
