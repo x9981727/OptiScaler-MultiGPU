@@ -10,7 +10,6 @@ if ($LASTEXITCODE) {throw 'Source unpack failed'}
 $source=Join-Path $root 'source'
 if(Test-Path (Join-Path $root 'overlay')) {Copy-Item (Join-Path $root 'overlay/*') $source -Recurse -Force}
 if(Test-Path (Join-Path $root 'integrations')) {Copy-Item (Join-Path $root 'integrations') $source -Recurse -Force}
-# Make the previously implicit standard-header dependencies explicit.
 foreach($relative in @('tests/core_tests.cpp','tests/magpie_guidance_tests.cpp','tests/streamline_camera_tests.cpp','tests/wire_tests.cpp','windows/ipc_selftest.cpp')) {
  $p=Join-Path $source $relative
  $s=[IO.File]::ReadAllText($p)
@@ -72,6 +71,11 @@ if(!$r1PatchCode -and !$r2PatchCode){
  $r3PatchCode=$LASTEXITCODE
 } else {$r3PatchCode=1}
 if(!$r1PatchCode -and !$r2PatchCode -and !$r3PatchCode){
+ python (Join-Path $source 'tools/apply_magpie_dlssfg_r4.py') $MagpieRoot --apply 2>&1 |
+  Tee-Object (Join-Path $reports 'magpie-dlssfg-native-r4.txt')
+ $r4PatchCode=$LASTEXITCODE
+} else {$r4PatchCode=1}
+if(!$r1PatchCode -and !$r2PatchCode -and !$r3PatchCode -and !$r4PatchCode){
  python $exporter $MagpieRoot (Join-Path $dist 'patched-Magpie-NativeBridge-code-for-review.zip')
  if($LASTEXITCODE){throw 'Patched Magpie source export failed'}
 }
@@ -80,9 +84,8 @@ if($opPatchCode){throw 'Pinned OptiScaler producer patch failed'}
 if($r1PatchCode){throw 'Pinned Magpie guidance patch failed'}
 if($r2PatchCode){throw 'Pinned Magpie runtime patch failed'}
 if($r3PatchCode){throw 'Pinned Magpie XeSSFG native guidance patch failed'}
+if($r4PatchCode){throw 'Pinned Magpie DLSSFG native constants patch failed'}
 
-# The upstream Magpie build defaults XeSS-FG off. Reuse the exact XeSS SDK commit
-# pinned by OptiScaler and require the real Intel headers/import libraries/runtime.
 git -C $op submodule update --init --depth 1 external/xess 2>&1 | Tee-Object (Join-Path $reports 'magpie-xess-submodule.txt')
 if($LASTEXITCODE){throw 'Pinned XeSS SDK submodule initialization failed'}
 $xessSdk=Join-Path $op 'external/xess'
@@ -91,8 +94,6 @@ if(Test-Path (Join-Path $root 'build-magpie.ps1')) {
  if($LASTEXITCODE){throw 'XeSSFG-enabled Magpie build failed'}
 }
 
-# Build the actual game-side producer only after the isolated protocol/runtime and
-# XeSSFG-linked Magpie consumer compile gates are green.
 git -C $op submodule update --init --recursive --depth 1 2>&1 | Tee-Object (Join-Path $reports 'optiscaler-submodules.txt')
 if($LASTEXITCODE){throw 'OptiScaler submodule initialization failed'}
 $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -109,5 +110,5 @@ if(Test-Path $opOut){
  Get-ChildItem $opOut -Recurse -File | Where-Object {$_.Extension -in @('.dll','.pdb','.ini','.bat')} |
   Copy-Item -Destination $dist -Force
 }
-'PASS: NativeBridge 9/9 + Magpie real XeSSFG SDK compile/link/import gate + native Depth/Motion/Camera r3 + patched OptiScaler producer build. Real AMD/NVIDIA dual-GPU game validation is separate.' |
+'PASS: NativeBridge 9/9 + Magpie real XeSSFG SDK compile/link + native Depth/Motion/Camera r3 + exact DLSSFG native constants r4 + patched OptiScaler producer build. Real AMD/NVIDIA dual-GPU game validation is separate.' |
  Set-Content (Join-Path $dist 'BUILD_STATUS.txt')
