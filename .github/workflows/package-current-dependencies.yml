@@ -1,0 +1,31 @@
+name: Collect current XeFG packaging dependencies
+on:
+  push:
+    branches: [package/current-xefg-complete-20260908]
+    paths: [.github/workflows/package-current-dependencies.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 11839e091686bd6a6118330096bd6f91493c1742
+      - name: Retrieve immutable matching official runtime, preserve source recipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packaging-base
+          curl --fail --location --retry 2 --max-time 120 'https://github.com/optiscaler/OptiScaler/releases/download/v0.9.4/Optiscaler_0.9.4-final.20260718._MM.7z' -o packaging-base/Optiscaler_0.9.4-official.7z
+          echo '575cb4df866116093df75af607e37fd70e10f5163e0f23fd5c804142e80ef0ad  packaging-base/Optiscaler_0.9.4-official.7z' | sha256sum -c -
+          git archive --format=tar.gz --prefix=OptiScaler-MultiGPU-source/ 11839e091686bd6a6118330096bd6f91493c1742 > packaging-base/current-v25-source-recipe.tar.gz
+          printf '%s\n' 'Official OptiScaler 0.9.4 runtime base, original upstream licenses retained.' 'Current custom DLL must be hash-matched to the physical machine separately.' 'This workflow does not compile or change the game DLL or certify frame pacing.' > packaging-base/SCOPE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XeFG-current-packaging-base
+          path: packaging-base/
+          compression-level: 0
+          retention-days: 7
