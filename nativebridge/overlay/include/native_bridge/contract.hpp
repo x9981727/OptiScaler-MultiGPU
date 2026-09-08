@@ -33,8 +33,9 @@ struct Camera {
     float jitter[2]{}, rawMotionToPixels[2]{}, invalidMotionValue{};
 };
 // Values intentionally match DXGI_FORMAT for direct host validation.
+// Unknown is handshake-only and is never valid in a published Packet/Layout.
 enum class Format : uint32_t {
-    Rgba16F=10, Rgba8=28, MotionRg16=34, DepthR32=41, Bgra8=87
+    Unknown=0, Rgba16F=10, Rgba8=28, MotionRg16=34, DepthR32=41, Bgra8=87
 };
 constexpr bool valid_color_format(Format f) noexcept {
     return f==Format::Rgba16F || f==Format::Rgba8 || f==Format::Bgra8;
