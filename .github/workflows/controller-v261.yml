@@ -1,0 +1,104 @@
+name: XeFG v26.1 controller correlation hotfix
+on:
+  push:
+    branches: [fix/v26-1-controller-correlation]
+    paths: ['v261/**', '.github/workflows/controller-v261.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+      - uses: actions/download-artifact@v4
+        with:
+          name: OptiScaler-XeFG-v26-GameTest
+          run-id: 34201045621
+          github-token: ${{ github.token }}
+          path: prior
+      - name: Verify original artifact and patch source provenance
+        shell: powershell
+        run: |
+          @'
+          from pathlib import Path
+          import zipfile,hashlib
+          p=Path('prior/OptiScaler-XeFG-v26-GameTest.zip')
+          assert hashlib.sha256(p.read_bytes()).hexdigest()=='e568c01066aab656ccd53d1edf406de1321fbe0c92eccc15e043af2d948726cc'
+          hashes={'correlation.py':'9d4afb23c3374b262acd4f7a8022d52d25ea178a7173a631c6969e14172ca5d3','patch_controller.py':'d0b3626a2cab2908faecc184f63d1bc5fdc2f06f6b7d6a0a89eacc5b4257cba5','test_correlation.py':'882e0a41c17acd3abc97e772f75ca7cded70be15646e97ea198f46889cca6a11'}
+          for name,h in hashes.items():
+              data=(Path('v261')/name).read_bytes().replace(b'\r\n',b'\n')
+              assert hashlib.sha256(data).hexdigest()==h,name
+              (Path('v261')/name).write_bytes(data)
+          with zipfile.ZipFile(p) as z:
+              for name in ('game_feedback.py','test_game.py','install_game.py'):
+                  (Path('v261')/name).write_bytes(z.read('source/'+name))
+          '@ | Set-Content -Encoding UTF8 verify-source.py
+          python verify-source.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python v261\patch_controller.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run retained and new Windows regression tests
+        shell: powershell
+        run: |
+          Push-Location v261
+          cmd /c "python -m unittest -v test_game test_correlation > windows-python-results.txt 2>&1"
+          $code=$LASTEXITCODE
+          Get-Content windows-python-results.txt
+          Pop-Location
+          if ($code -ne 0) { exit $code }
+      - name: Build standalone x64 controller
+        shell: powershell
+        run: |
+          python -m pip install pyinstaller==6.11.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --clean --noconfirm --onefile --name AutoPacing --paths v261 v261\game_feedback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\AutoPacing.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package binary, readable source and build evidence
+        shell: powershell
+        run: |
+          @'
+          from pathlib import Path
+          import zipfile,hashlib,shutil,json,os,struct
+          stage=Path('controller-package');(stage/'tools').mkdir(parents=True);(stage/'source').mkdir();(stage/'tests').mkdir()
+          exe=Path('dist/AutoPacing.exe');data=exe.read_bytes();pe=struct.unpack_from('<I',data,60)[0]
+          assert data[:2]==b'MZ' and data[pe:pe+6]==b'PE\0\0\x64\x86'
+          shutil.copyfile(exe,stage/'tools/AutoPacing.exe')
+          with zipfile.ZipFile('prior/OptiScaler-XeFG-v26-GameTest.zip') as z:
+              (stage/'tools/PresentMon-2.5.1-x64.exe').write_bytes(z.read('tools/PresentMon-2.5.1-x64.exe'))
+              for name in z.namelist():
+                  if name.startswith('licenses/') and not name.endswith('/'):
+                      p=stage/name;p.parent.mkdir(exist_ok=True,parents=True);p.write_bytes(z.read(name))
+          for p in Path('v261').glob('*.py'):shutil.copyfile(p,stage/'source'/p.name)
+          shutil.copyfile('.github/workflows/controller-v261.yml',stage/'source/controller-v261.yml')
+          shutil.copyfile('v261/windows-python-results.txt',stage/'tests/windows-python-results.txt')
+          manifest={'revision':'26.1','kind':'controller_only_hotfix_no_game_dll','commit':os.environ['GITHUB_SHA'],'run_id':os.environ['GITHUB_RUN_ID'],'prior_artifact_sha256':'e568c01066aab656ccd53d1edf406de1321fbe0c92eccc15e043af2d948726cc','unchanged_game_dll_sha256':'e886b0fef626aec15bf9f833bbac4f4aaed39c0c44aaee8edd04919971a99be7','windows_tests':37,'controller_sha256':hashlib.sha256(data).hexdigest(),'source_hashes':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (stage/'source').glob('*.py')},'game_hardware_retested':False,'pacing_algorithm_changed':False,'game_ini_modified':False,'python_version':'3.11.9','pyinstaller_version':'6.11.1'}
+          (stage/'BUILD-MANIFEST.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+          with zipfile.ZipFile('XeFG-v26.1-controller-CI.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(stage.rglob('*')):
+                  if p.is_file():z.write(p,p.relative_to(stage))
+          print(json.dumps(manifest,indent=2))
+          '@ | Set-Content -Encoding UTF8 package.py
+          python package.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XeFG-v26.1-controller-hotfix
+          path: XeFG-v26.1-controller-CI.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: XeFG-v26.1-test-evidence
+          path: v261/windows-python-results.txt
+          if-no-files-found: warn
+          retention-days: 14
