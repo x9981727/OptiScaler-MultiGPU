@@ -37,6 +37,8 @@ jobs:
           '@ | Set-Content -Encoding UTF8 expand_v26.py
           python expand_v26.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python v26-overrides.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install pyyaml==6.0.2 pyinstaller==6.11.1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test actual controller and reversible installer
