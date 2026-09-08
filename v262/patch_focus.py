@@ -142,9 +142,23 @@ new="'association':matcher.summary(),'focus_handoff':focus_result,'observe_only'
 if s.count(old)!=1: raise SystemExit('report anchor mismatch')
 s=s.replace(old,new)
 
+# Assert the intended semantic edits before pinning the Windows output bytes.
+for marker in (
+    'def handoff_game_focus(pid: int):',
+    "--no-auto-focus",
+    "capture-v262-",
+    "XeFG v26.2 AUTO-FOCUS HOTFIX.",
+    "GAME NOT ELIGIBLE/FOREGROUND",
+    "'controller_revision':'26.2'",
+    "'focus_handoff':focus_result",
+):
+    if marker not in s:
+        raise SystemExit('Missing v26.2 semantic marker: '+marker)
 out=s.encode('utf-8')
-final='ab1b47c8cb635a72c27a6e3cd6404f8f5d4edd12ecd26b5885979a46b4a027d1'
-if hashlib.sha256(out).hexdigest()!=final:
-    raise SystemExit('v26.2 output hash mismatch: '+hashlib.sha256(out).hexdigest())
+# This exact hash was produced by the pinned Windows runner from the verified v26.1 source.
+final='85011f12e5375bf8e59da00b526570e98e967b25f2d878abfca97cebd3705750'
+actual=hashlib.sha256(out).hexdigest()
+if actual!=final:
+    raise SystemExit('v26.2 output hash mismatch: '+actual)
 p.write_bytes(out)
-print('Patched v26.1 -> v26.2',final)
+print('Patched v26.1 -> v26.2',actual)
