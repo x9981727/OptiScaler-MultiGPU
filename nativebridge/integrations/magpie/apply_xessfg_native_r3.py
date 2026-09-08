@@ -33,11 +33,13 @@ with tempfile.NamedTemporaryFile(delete=False, suffix='.patch') as f:
     f.write(patch)
     patch_path = Path(f.name)
 try:
-    # The r3 patch was assembled from reviewed chunks and some hunk line counts
-    # became stale while the contents remained intact. --recount recomputes only
-    # those counts; --check still requires every context line to match the pinned
-    # post-r2 source before anything is written.
-    common = ['git', '-C', str(root), 'apply', '--recount', '--whitespace=nowarn']
+    # Every base file is hash-locked above before normalization. Recount stale
+    # hunk lengths and ignore whitespace-only representation differences caused
+    # by CRLF/LF normalization; non-whitespace context must still match.
+    common = [
+        'git', '-C', str(root), 'apply', '--recount', '--whitespace=nowarn',
+        '--ignore-space-change', '--ignore-whitespace'
+    ]
     subprocess.run([*common, '--check', str(patch_path)], check=True)
     subprocess.run([*common, str(patch_path)], check=True)
 finally:
