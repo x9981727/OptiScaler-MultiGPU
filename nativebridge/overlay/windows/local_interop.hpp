@@ -27,6 +27,13 @@ public:
     HRESULT WaitConsumed(ID3D12CommandQueue* queue, uint64_t value) noexcept;
     HRESULT SignalReady(ID3D12CommandQueue* queue, uint64_t value) noexcept;
 
+    // Compatibility aliases for the first runtime self-test; production Magpie
+    // uses the explicit ready/consumed names below.
+    HRESULT Signal(ID3D12CommandQueue* queue, uint64_t value) noexcept {
+        return SignalReady(queue, value);
+    }
+    ID3D11Fence* Fence11() const noexcept { return ReadyFence11(); }
+
     std::array<ID3D12Resource*, 3> Resources12() const noexcept;
     const std::array<ComPtr<ID3D11Texture2D>, 3>& Textures11() const noexcept { return textures11_; }
     ID3D11Fence* ReadyFence11() const noexcept { return ready11_.Get(); }
