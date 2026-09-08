@@ -1,0 +1,152 @@
+ 	_useExternalMotion(useExternalMotion),
++	_useNativeGuidance(useNativeGuidance),
+ 	_initializationError(requestedMultiplier > 2 ?
+ 		ScalingError::XeSSMfgUnsupported : ScalingError::ScalingFailedGeneral) {}
+ XeSSFGPresenter::~XeSSFGPresenter() noexcept = default;
+@@ -1030,6 +1256,9 @@
+ bool XeSSFGPresenter::WaitForFrameCapacity(DWORD) noexcept { return false; }
+ void XeSSFGPresenter::SetFrameGuidance(
+ 	ID3D11Texture2D*, FrameGuidanceFrameId, bool, const RECT&) noexcept {}
++void XeSSFGPresenter::SetNativeFrameGuidance(
++	ID3D11Texture2D*, ID3D11Texture2D*, const nb::Camera&,
++	FrameGuidanceFrameId, bool, const RECT&) noexcept {}
+ bool XeSSFGPresenter::HasIndependentOverlay() const noexcept { return false; }
+ bool XeSSFGPresenter::BeginOverlayFrame(
+ 	winrt::com_ptr<ID3D11Texture2D>&,
+--- a/src/Magpie.Core/Renderer.h
++++ b/src/Magpie.Core/Renderer.h
+@@ -263,14 +263,21 @@
+ 		_frontendSharedMotionTextures;
+ 	std::array<winrt::com_ptr<IDXGIKeyedMutex>, MAX_SHARED_TEXTURE_SLOTS>
+ 		_frontendSharedMotionTextureMutexes;
++	std::array<winrt::com_ptr<ID3D11Texture2D>, MAX_SHARED_TEXTURE_SLOTS>
++		_frontendSharedDepthTextures;
++	std::array<winrt::com_ptr<IDXGIKeyedMutex>, MAX_SHARED_TEXTURE_SLOTS>
++		_frontendSharedDepthTextureMutexes;
+ 	std::array<uint64_t, MAX_SHARED_TEXTURE_SLOTS> _lastAccessMutexKeys{};
+ 	std::array<std::mutex, MAX_SHARED_TEXTURE_SLOTS> _sharedTextureAccessMutexes;
+ 	winrt::com_ptr<ID3D11Texture2D> _frontendBaseTexture;
+ 	winrt::com_ptr<ID3D11Texture2D> _frontendPresentedBaseTexture;
+ 	winrt::com_ptr<ID3D11Texture2D> _frontendMotionTexture;
++	winrt::com_ptr<ID3D11Texture2D> _frontendDepthTexture;
+ 	FrameGuidanceFrameId _frontendMotionFrameId = 0;
+ 	bool _frontendMotionValid = false;
+ 	bool _frontendMotionReset = true;
++	bool _frontendNativeGuidanceValid = false;
++	nb::Camera _frontendNativeCamera{};
+ 	bool _frontendBaseValid = false;
+ 	bool _frontendPresentedBaseValid = false;
+ 	bool _frontendBaseNeedsPresent = false;
+@@ -321,10 +328,16 @@
+ 		_backendSharedMotionTextures;
+ 	std::array<winrt::com_ptr<IDXGIKeyedMutex>, MAX_SHARED_TEXTURE_SLOTS>
+ 		_backendSharedMotionTextureMutexes;
++	std::array<winrt::com_ptr<ID3D11Texture2D>, MAX_SHARED_TEXTURE_SLOTS>
++		_backendSharedDepthTextures;
++	std::array<winrt::com_ptr<IDXGIKeyedMutex>, MAX_SHARED_TEXTURE_SLOTS>
++		_backendSharedDepthTextureMutexes;
+ 	std::array<HANDLE, MAX_SHARED_TEXTURE_SLOTS> _sharedTextureHandles{};
+ 	std::array<wil::unique_handle, MAX_SHARED_TEXTURE_SLOTS>
+ 		_sharedMotionTextureHandles;
+ 	std::array<wil::unique_handle, MAX_SHARED_TEXTURE_SLOTS>
++		_sharedDepthTextureHandles;
++	std::array<wil::unique_handle, MAX_SHARED_TEXTURE_SLOTS>
+ 		_sharedTextureAvailableEvents;
+ 	uint32_t _sharedTextureSlotCount = 1;
+ 	uint32_t _nextBackendSharedTextureSlot = 0;
+@@ -343,6 +356,9 @@
+ 		_sharedMotionValid{};
+ 	std::array<std::atomic<bool>, MAX_SHARED_TEXTURE_SLOTS>
+ 		_sharedMotionReset{};
++	std::array<std::atomic<bool>, MAX_SHARED_TEXTURE_SLOTS>
++		_sharedNativeGuidanceValid{};
++	std::array<nb::Camera, MAX_SHARED_TEXTURE_SLOTS> _sharedNativeCameras{};
+ 	std::atomic<uint32_t> _latestSharedTextureSlot = 0;
+ 	std::atomic<uint32_t> _sharedTextureGeneration = 0;
+ 	std::atomic<bool> _synchronousFramePresentationEnabled = false;
+@@ -383,6 +399,7 @@
+ 	uint32_t _dlssFgRealPublishFailure = 0;
+ 	bool _dlssFgPresentationStopping = false;
+ 	bool _isXeSSFrameGenerationActive = false;
++	bool _nativeBridgeRequested = false;
+ 	FrameGenerationEffectKind _xessFrameGenerationKind =
+ 		FrameGenerationEffectKind::None;
+ 	MotionVectorRequest _xessMotionRequest{};
+--- a/src/Magpie.Core/Renderer.cpp
++++ b/src/Magpie.Core/Renderer.cpp
+@@ -44,8 +44,9 @@
+ 
+ // AcquireSync returns WAIT_TIMEOUT / WAIT_ABANDONED as nonnegative values.
+ // Treat only S_OK as ownership; FAILED(hr) alone is not a valid test here.
++template <size_t N>
+ static HRESULT AcquirePresentationTextures(
+-	const std::array<IDXGIKeyedMutex*, 3>& mutexes, uint64_t key, DWORD timeout,
++	const std::array<IDXGIKeyedMutex*, N>& mutexes, uint64_t key, DWORD timeout,
+ 	size_t* failedIndex = nullptr) noexcept {
+ 	for (size_t i = 0; i < mutexes.size(); ++i) {
+ 		if (!mutexes[i]) continue;
+@@ -59,8 +60,9 @@
+ 	return S_OK;
+ }
+ 
++template <size_t N>
+ static HRESULT ReleasePresentationTextures(
+-	const std::array<IDXGIKeyedMutex*, 3>& mutexes, uint64_t key) noexcept {
++	const std::array<IDXGIKeyedMutex*, N>& mutexes, uint64_t key) noexcept {
+ 	HRESULT result = S_OK;
+ 	for (auto mutex : mutexes) {
+ 		if (!mutex) continue;
+@@ -73,7 +75,8 @@
+ static FrameGuidanceRequirements CollectFrameGuidanceRequirements(
+ 	const std::vector<std::unique_ptr<NativeEffectBackend>>& backends,
+ 	const DLSSFrameGenerator* frameGenerator,
+-	MotionVectorRequest xessRequest = {}
++	MotionVectorRequest xessRequest = {},
++	bool forceXeSSNative = false
+ ) noexcept {
+ 	FrameGuidanceRequirements result;
+ 	for (const auto& backend : backends) {
+@@ -86,6 +89,7 @@
+ 		result.zero = true;
+ 		result.Add(xessRequest);
+ 	}
++	if (forceXeSSNative) result.zero = true;
+ 	return result.Resolved();
+ }
+ 
+@@ -216,6 +220,8 @@
+ 	_frameTraceStarted = FrameTrace::Start();
+ 	_xessMotionRequest = {};
+ 	_isXeSSFrameGenerationActive = false;
++	_nativeBridgeRequested = GetEnvironmentVariableW(
++		L"MAGPIE_NATIVE_BRIDGE", nullptr, 0) > 0;
+ 	_xessFrameGenerationKind = FrameGenerationEffectKind::None;
+ 
+ 	const std::vector<EffectOption>& effects =
+@@ -301,7 +307,8 @@
+ 		auto xessPresenter = std::make_unique<XeSSFGPresenter>(
+ 			*xessVariant,
+ 			xessFrameGenerationMultiplier,
+-			_xessMotionRequest.method != OpticalFlowMethod::None);
++			_nativeBridgeRequested || _xessMotionRequest.method != OpticalFlowMethod::None,
++			_nativeBridgeRequested);
+ 		if (!xessPresenter->Initialize(hwndAttach, _frontendResources)) {
+ 			Logger::Get().Error("初始化 XeSSFGPresenter 失败");
+ 			return xessPresenter->InitializationError();
+@@ -501,9 +508,12 @@
+ 	_frontendBaseTexture = nullptr;
+ 	_frontendPresentedBaseTexture = nullptr;
+ 	_frontendMotionTexture = nullptr;
++	_frontendDepthTexture = nullptr;
+ 	_frontendMotionFrameId = 0;
+ 	_frontendMotionValid = false;
+ 	_frontendMotionReset = true;
++	_frontendNativeGuidanceValid = false;
++	_frontendNativeCamera = {};
+ 	_frontendBaseValid = false;
+ 	_frontendPresentedBaseValid = false;
+ 	_frontendBaseNeedsPresent = false;
+@@ -512,6 +522,8 @@
+ 		_frontendSharedTextures[i] = nullptr;
+ 		_frontendSharedMotionTextureMutexes[i] = nullptr;
+ 		_frontendSharedMotionTextures[i] = nullptr;
