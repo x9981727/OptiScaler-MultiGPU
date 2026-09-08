@@ -7,6 +7,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -72,7 +73,8 @@ int run(IDXGIAdapter1* adapter){
     nb::Token received{};nb::Packet packet2{};
     check(SUCCEEDED(consumer.ReceiveFrame(received,packet2,packet.timestampNs,5000)),"consumer receive frame");
     check(received==token&&packet2.key==packet.key,"frame identity");
-    check(packet2.camera.viewToClip==packet.camera.viewToClip,"camera matrices survive runtime session");
+    check(std::memcmp(&packet2.camera.viewToClip,&packet.camera.viewToClip,sizeof(nb::Matrix))==0,
+        "camera matrices survive runtime session");
 
     check(SUCCEEDED(consumer.SendRelease(token,5000)),"consumer send release");
     nb::Token released{};
