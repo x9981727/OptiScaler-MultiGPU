@@ -28,6 +28,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Diagnostic source anchors failed' }
           python lab-native/enable_owned_staging.py intel-reference
           if ($LASTEXITCODE -ne 0) { throw 'Owned frame source anchors failed' }
+          python lab-native/refine_output_fence.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Output release source anchors failed' }
           Copy-Item lab-native/stage-test.cpp intel-reference/samples/basic_sample_frame_generation/
           @'
           add_executable(native_stage_test stage-test.cpp)
@@ -58,11 +60,12 @@ jobs:
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NATIVE-GATE-MANIFEST.json "$out/NATIVE-GATE-MANIFEST.json"
           Copy-Item probe-build/stage-test-results.txt "$out/stage-test-results.txt"
           New-Item probe-build/source-review -ItemType Directory -Force | Out-Null
-          Copy-Item lab-native/NativeGate.h,lab-native/NativeFrameStage.h,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/stage-test.cpp probe-build/source-review/
+          Copy-Item lab-native/NativeGate.h,lab-native/NativeFrameStage.h,lab-native/apply_native_gate.py,lab-native/add_diagnostics.py,lab-native/enable_owned_staging.py,lab-native/refine_output_fence.py,lab-native/stage-test.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeGate.h probe-build/source-review/NativeGate-compiled.h
-          'Isolated owned-output prototype. Uses existing system Direct3D runtime, NOT Agility diagnostic runtime. No game DLL built or installed. WARP test validates copying only, not FPS or final scanout pixels. Resize/lifecycle game integration is not validated.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeFrameStage.h probe-build/source-review/NativeFrameStage-compiled.h
+          'Isolated deadline-before-copy prototype. Uses existing system Direct3D runtime. No game DLL built or installed. WARP validates copying, not FPS or generated pixels. Resize/lifecycle game integration is not validated.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
           Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content probe-build/SHA256.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
