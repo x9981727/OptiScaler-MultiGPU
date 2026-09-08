@@ -24,6 +24,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Ring source anchors failed' }
           python lab-native/apply_native_gate.py intel-reference
           if ($LASTEXITCODE -ne 0) { throw 'Native source anchors failed' }
+          python lab-native/add_diagnostics.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic source anchors failed' }
       - name: Compile Windows reference executable
         shell: pwsh
         run: |
@@ -42,7 +44,8 @@ jobs:
           Copy-Item lab-native/* probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h probe-build/source-review/
-          'This is an isolated SDK native output queue observer and deadline experiment. No OptiScaler game DLL is built or installed. Native gate and sleep bypass default OFF. No FPS, pixel, stability or game acceptance claimed by CI.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeGate.h probe-build/source-review/NativeGate-compiled.h
+          'Isolated native output queue diagnostic. No OptiScaler game DLL is built or installed. Gate, split queue and debug flags default OFF. No hardware FPS or image certification by CI.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
           Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content probe-build/SHA256.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
