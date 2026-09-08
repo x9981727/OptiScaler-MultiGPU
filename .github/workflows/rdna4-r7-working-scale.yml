@@ -83,8 +83,9 @@ jobs:
           $log=(Resolve-Path '.').Path+'\r7-msbuild.log'
           & $msbuild (Join-Path $root 'OptiScaler.sln') /m:4 /t:Build /p:Configuration=Release /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$($sdk.Name)" /p:PreBuildEventUseInBuild=false /p:PostBuildEventUseInBuild=false /v:minimal /fl "/flp:logfile=$log;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { Get-Content $log -Tail 350; throw 'Patched upstream build failed' }
-          $opt=Join-Path $root 'x64/Release/OptiScaler.dll'
-          $fwd=Join-Path $root 'x64/Release/a/nvngx.dll_dlssnr.dll'
+          $release=Join-Path $root 'x64/Release/a'
+          $opt=Join-Path $release 'OptiScaler.dll'
+          $fwd=Join-Path $release 'nvngx.dll_dlssnr.dll'
           if (!(Test-Path $opt)) { throw 'Build output missing: OptiScaler.dll' }
           if (!(Test-Path $fwd)) { throw 'Build output missing: nvngx.dll_dlssnr.dll' }
           Get-Item $opt,$fwd | Select-Object FullName,Length
@@ -104,8 +105,9 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $src='D:/u/OptiScaler-DLSSNR-PreSR-Multipass-main'
-          $opt=Join-Path $src 'x64/Release/OptiScaler.dll'
-          $fwd=Join-Path $src 'x64/Release/a/nvngx.dll_dlssnr.dll'
+          $release=Join-Path $src 'x64/Release/a'
+          $opt=Join-Path $release 'OptiScaler.dll'
+          $fwd=Join-Path $release 'nvngx.dll_dlssnr.dll'
           $static='D:/u/package-amd-presr'
           New-Item -ItemType Directory -Force -Path package,package/presets,package/reports,package/source | Out-Null
           Copy-Item $opt package/OptiScaler.dll
@@ -137,15 +139,13 @@ jobs:
           @'
           RDNA4 r7.1 AMD-native WorkingScale Test
           ======================================
-          This is a manual RX 9070 XT performance/quality experiment, not a final release.
+          Manual RX 9070 XT performance/quality experiment; not yet a validated final release.
 
-          Test order: 1.00, 0.85, 0.75, 0.67, 0.50. 0.25 is diagnostic only.
-          Keep the existing dlssnr_on_amd_weights.bin; it is intentionally not duplicated here.
-          For each preset, copy it over OptiScaler.ini, run the same scene/settings, and check amd_presr.log.
-          The log must show work dimensions shrinking when WorkingScale < 1.0.
-          Compare GPU frame time/FPS, NR detail, temporal stability, disocclusion edges and ghosting.
-          Scale<1 intentionally changes neural working resolution, so byte-identical output is not expected.
-          CI compiled the C++ and four HLSL shaders and linked OptiScaler.dll; CI has no RX 9070 XT and did not execute HIP.
+          Keep the existing dlssnr_on_amd_weights.bin. Test presets in order: 1.00, 0.85, 0.75, 0.67, 0.50; 0.25 is diagnostic only.
+          For each preset, copy it over OptiScaler.ini and use the same game scene/settings. amd_presr.log must show base=... work=... with reduced work dimensions below scale 1.0.
+          Compare GPU frame time/FPS plus NR detail, temporal stability, disocclusion edges and ghosting.
+          Scale<1 intentionally changes the neural working raster, so byte-identical output to 1.0 is not expected.
+          CI compiled the C++, all four HLSL shaders, and linked OptiScaler.dll; CI has no RX 9070 XT and did not execute the private HIP runtime.
           Pinned upstream: e58ff27a3d5ac86184875e01b317ff1463a247c1.
           '@ | Set-Content package/README_R7_AMD_WORKINGSCALE.txt -Encoding utf8
           @{ revision='r7.1'; commit=$env:GITHUB_SHA; upstream='e58ff27a3d5ac86184875e01b317ff1463a247c1'; target='RX 9070 XT / gfx1201'; amd_working_scale_implemented=$true; scale1_gate_passed=$true; four_hlsl_compile_gate_passed=$true; optiscaler_release_link_passed=$true; target_gpu_tested_in_ci=$false; game_tested=$false; final_release=$false } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
