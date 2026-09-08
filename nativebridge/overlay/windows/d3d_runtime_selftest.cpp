@@ -119,7 +119,7 @@ HRESULT UploadTexture(ID3D12Device* device, ID3D12GraphicsCommandList* list,
     return S_OK;
 }
 
-HRESULT WaitReady(const Endpoint& endpoint, uint32_t slot, uint64_t serial, bool done) {
+HRESULT WaitEndpoint(const Endpoint& endpoint, uint32_t slot, uint64_t serial, bool done) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (;;) {
         const HRESULT hr = done ? endpoint.PollDone(slot, serial) : endpoint.PollReady(slot, serial);
@@ -130,10 +130,23 @@ HRESULT WaitReady(const Endpoint& endpoint, uint32_t slot, uint64_t serial, bool
     }
 }
 
+HRESULT CreateD3D11(IDXGIAdapter1* adapter, ComPtr<ID3D11Device5>& device, ComPtr<ID3D11DeviceContext4>& context) {
+    D3D_FEATURE_LEVEL level{};
+    ComPtr<ID3D11Device> baseDevice;
+    ComPtr<ID3D11DeviceContext> baseContext;
+    HRESULT hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+        baseDevice.ReleaseAndGetAddressOf(), &level, baseContext.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) return hr;
+    hr = baseDevice.As(&device);
+    if (FAILED(hr)) return hr;
+    return baseContext.As(&context);
+}
+
 bool VerifyD3D11(ID3D11Device5* device, ID3D11DeviceContext4* context,
                  const std::array<ComPtr<ID3D11Texture2D>, 3>& textures,
                  ID3D11Fence* fence) {
-    context->Wait(fence, kSerial);
+    if (FAILED(context->Wait(fence, kSerial))) return false;
     std::array<ComPtr<ID3D11Texture2D>, 3> staging;
     for (size_t i = 0; i < textures.size(); ++i) {
         D3D11_TEXTURE2D_DESC desc{};
@@ -206,42 +219,31 @@ int RunOnAdapter(IDXGIAdapter1* adapter) {
     ID3D12CommandList* producerLists[]{producerList.Get()};
     producerQueue->ExecuteCommandLists(1, producerLists);
     if (FAILED(producer.SignalReady(producerQueue.Get(), 0, kSerial))) return 20;
-    if (FAILED(WaitReady(consumer, 0, kSerial, false))) return 21;
+    if (FAILED(WaitEndpoint(consumer, 0, kSerial, false))) return 21;
 
-    LocalInteropFrame local;
-    if (FAILED(local.Create(consumerDevice.Get(), consumer.GetLayout()))) return 22;
-    ComPtr<ID3D12CommandAllocator> consumerAllocator;
-    ComPtr<ID3D12GraphicsCommandList> consumerList;
-    if (FAILED(CreateList(consumerDevice.Get(), consumerAllocator, consumerList))) return 23;
-    auto localPtrs = local.Resources();
-    if (FAILED(consumer.RecordRead(0, consumerList.Get(), localPtrs, states))) return 24;
-    if (FAILED(consumerList->Close())) return 25;
-    ID3D12CommandList* consumerLists[]{consumerList.Get()};
-    consumerQueue->ExecuteCommandLists(1, consumerLists);
-    if (FAILED(consumer.SignalDone(consumerQueue.Get(), 0, kSerial))) return 26;
-    if (FAILED(local.Signal(consumerQueue.Get(), kSerial))) return 27;
-    if (FAILED(WaitReady(producer, 0, kSerial, true))) return 28;
-
-    D3D_FEATURE_LEVEL level{};
-    ComPtr<ID3D11Device> base11;
-    ComPtr<ID3D11DeviceContext> baseContext;
-    hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-        nullptr, 0, D3D11_SDK_VERSION, base11.ReleaseAndGetAddressOf(), &level,
-        baseContext.ReleaseAndGetAddressOf());
-    if (FAILED(hr)) return 29;
     ComPtr<ID3D11Device5> device11;
     ComPtr<ID3D11DeviceContext4> context11;
-    if (FAILED(base11.As(&device11)) || FAILED(baseContext.As(&context11))) return 30;
-    std::array<ComPtr<ID3D11Texture2D>, 3> opened;
-    ComPtr<ID3D11Fence> openedFence;
-    hr = local.OpenD3D11(device11.Get(), opened, openedFence);
+    if (FAILED(CreateD3D11(adapter, device11, context11))) return 22;
+    LocalInteropFrame local;
+    hr = local.Create(device11.Get(), consumerDevice.Get(), consumer.GetLayout());
     if (FAILED(hr)) {
-        std::cerr << "OpenD3D11 failed hr=0x" << std::hex << uint32_t(hr) << std::dec << "\n";
-        return 31;
+        std::cerr << "LocalInteropFrame::Create failed hr=0x" << std::hex << uint32_t(hr) << std::dec << "\n";
+        return 23;
     }
-    if (!VerifyD3D11(device11.Get(), context11.Get(), opened, openedFence.Get())) return 32;
+    ComPtr<ID3D12CommandAllocator> consumerAllocator;
+    ComPtr<ID3D12GraphicsCommandList> consumerList;
+    if (FAILED(CreateList(consumerDevice.Get(), consumerAllocator, consumerList))) return 24;
+    auto localPtrs = local.Resources12();
+    if (FAILED(consumer.RecordRead(0, consumerList.Get(), localPtrs, states))) return 25;
+    if (FAILED(consumerList->Close())) return 26;
+    ID3D12CommandList* consumerLists[]{consumerList.Get()};
+    consumerQueue->ExecuteCommandLists(1, consumerLists);
+    if (FAILED(consumer.SignalDone(consumerQueue.Get(), 0, kSerial))) return 27;
+    if (FAILED(local.Signal(consumerQueue.Get(), kSerial))) return 28;
+    if (FAILED(WaitEndpoint(producer, 0, kSerial, true))) return 29;
 
-    std::cout << "PASS d3d12-shared-heap -> local-d3d12 -> d3d11 shared textures/fence\n";
+    if (!VerifyD3D11(device11.Get(), context11.Get(), local.Textures11(), local.Fence11())) return 30;
+    std::cout << "PASS cross-adapter heap/fences -> consumer D3D12 copy -> Magpie-style D3D11 shared textures/fence, exact Color/Depth/MV readback\n";
     return 0;
 }
 } // namespace
@@ -249,7 +251,6 @@ int RunOnAdapter(IDXGIAdapter1* adapter) {
 int main() {
     ComPtr<IDXGIFactory1> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.ReleaseAndGetAddressOf())))) return 1;
-    bool foundD3D12 = false;
     for (UINT i = 0;; ++i) {
         ComPtr<IDXGIAdapter1> adapter;
         const HRESULT enumHr = factory->EnumAdapters1(i, adapter.ReleaseAndGetAddressOf());
@@ -259,16 +260,12 @@ int main() {
         adapter->GetDesc1(&desc);
         const int rc = RunOnAdapter(adapter.Get());
         if (rc == 77) continue;
-        foundD3D12 = true;
         if (rc != 0) {
             std::wcerr << L"Adapter failed: " << desc.Description << L" stage=" << rc << L"\n";
             return rc;
         }
         return 0;
     }
-    if (!foundD3D12) {
-        std::cout << "SKIP no adapter supports the NativeBridge cross-adapter heap contract\n";
-        return 77;
-    }
-    return 3;
+    std::cout << "SKIP no adapter supports the NativeBridge D3D12 transport contract\n";
+    return 77;
 }
