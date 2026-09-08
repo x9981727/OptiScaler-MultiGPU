@@ -1,0 +1,54 @@
+name: Build isolated Intel XeFG physical reference
+on:
+  push:
+    branches: [test/xefg-physical-reference]
+    paths: [.github/workflows/physical-reference.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-reference:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact official Intel reference source
+        uses: actions/checkout@v4
+        with:
+          repository: intel/xess
+          ref: 207b703ad215da5b86dde04819a16277a96980aa
+          path: intel-reference
+      - name: Configure unmodified reference sample
+        shell: pwsh
+        run: |
+          cmake -S intel-reference/samples/basic_sample_frame_generation -B reference-build -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Reference configuration failed' }
+      - name: Build Windows Release reference application
+        shell: pwsh
+        run: |
+          cmake --build reference-build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Reference compilation failed' }
+      - name: Package provenance and checksums
+        shell: pwsh
+        run: |
+          $out='reference-build/bin/Release'
+          Copy-Item intel-reference/LICENSE "$out/INTEL-SDK-LICENSE.txt"
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/README.md "$out/REFERENCE-README.md"
+          @'
+          Isolated Intel XeFG reference application, NOT an OptiScaler fix.
+          Exact unmodified source: intel/xess 207b703ad215da5b86dde04819a16277a96980aa.
+          Run only in its own test directory. Do not replace game files.
+          Reference supports -gpu_id, -fps, -width, -height, -borderless and -max_frames.
+          Native single-adapter reference tests do not certify dual-adapter game performance or flicker.
+          Use copies of the existing game's Intel SDK DLLs for version-matched controls; record hashes.
+          Raw hardware traces and user paths must not be committed to the public repository.
+          '@ | Set-Content -Encoding utf8 "$out/TEST-SCOPE.txt"
+          Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content -Encoding utf8 reference-build/reference-sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Intel-XeFG-pinned-physical-reference
+          path: |
+            reference-build/bin/Release/
+            reference-build/reference-sha256.txt
+          retention-days: 14
+          if-no-files-found: error
