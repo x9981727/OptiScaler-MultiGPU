@@ -1,0 +1,52 @@
+name: NativeBridge Windows build
+on:
+  push:
+    branches: [work/magpie-nativebridge-r2]
+    paths: ['.github/workflows/build-nativebridge.yml', 'nativebridge/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nativebridge-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Prepare compiler and pinned Magpie source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install conan
+          if ($LASTEXITCODE) { throw 'Conan install failed' }
+          git clone --no-checkout https://github.com/SAOG0721/Magpie.git _upstream/Magpie
+          if ($LASTEXITCODE) { throw 'Clone failed' }
+          git -C _upstream/Magpie checkout ac1cc8b0f2efc78323898395cc1336bcbecdc276
+          if ($LASTEXITCODE) { throw 'Pinned checkout failed' }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -products '*' -property installationVersion
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' | Select-Object Name
+      - name: Apply and test NativeBridge when present
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path nativebridge/ci-build.ps1) {
+            & nativebridge/ci-build.ps1 -MagpieRoot "$pwd\_upstream\Magpie"
+            if ($LASTEXITCODE) { throw 'NativeBridge build failed' }
+          } else {
+            'Preflight only: NativeBridge integration files have not been added yet.'
+          }
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: NativeBridge-Windows-evidence
+          if-no-files-found: warn
+          path: |
+            nativebridge/reports/**
+            nativebridge/dist/**
