@@ -26,6 +26,18 @@ once('''            dispatchScale(0,p->scaleColourPipeline.Get(),p->workColour.G
             dispatchScale(0,p->scaleColourPipeline.Get(),p->workColour.Get());
             Barrier(cmd,f.colour,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,f.colourState);
             dispatchScale(4,p->scaleMotionPipeline.Get(),p->workMotion.Get());''','colour source state')
+# The NR contract explicitly says the game-provided MV scale is already independent of resource
+# resolution/subrect. The reduced motion texture advertises its own work extent, so multiplying the
+# scale by work/base would count the raster reduction twice and under-reproject temporal history.
+contract=(root/'OptiScaler/shaders/dlssnr/DlssNr_Common.h').read_text(encoding='utf-8').replace('\r\n','\n')
+if 'scaling by the resolution ratio on\n    // top of that counts it twice' not in contract:
+    raise RuntimeError('Pinned DLSS-NR MV scale pass-through contract changed; re-audit before building')
+once('''            packet.scaleX = scaled ? f.motionScaleX * (float(workW) / float(w)) : f.motionScaleX;
+            packet.scaleY = scaled ? f.motionScaleY * (float(workH) / float(h)) : f.motionScaleY;''',
+'''            // Preserve the game-provided MV encoding scale. The reduced resource extent already
+            // describes the smaller raster; applying work/base here would double-count that resize.
+            packet.scaleX = f.motionScaleX;
+            packet.scaleY = f.motionScaleY;''','MV scale pass-through')
 cpp.write_text(s,encoding='utf-8',newline='\n')
 
 # The fork snapshot omitted OptiScaler's committed binary build libraries. Use a full shallow clone
@@ -93,7 +105,8 @@ for name in ('ScaleColourShader','ScaleMotionShader','ScaleDepthShader','Composi
     exports[name]={'sha256':hashlib.sha256(code.encode()).hexdigest(),'bytes':len(code.encode())}
 report={'backend_sha256':hashlib.sha256(cpp.read_bytes()).hexdigest(),'shaders':exports,
         'windows_minmax_macro_avoided':True,'sm5_uint64_dependency_removed':True,
-        'full_colour_state_restored':True,'release_output_aligned_to_packaging_dir':True,
+        'full_colour_state_restored':True,'motion_scale_passthrough':True,
+        'motion_scale_double_resize_avoided':True,'release_output_aligned_to_packaging_dir':True,
         'dependency_source':'official OptiScaler full shallow clone',
         'official_dependency_commit':official_commit,'private_link_dependencies_verified':private_deps,
         'freetype_sha256':hashlib.sha256(freetype_dst.read_bytes()).hexdigest(),
