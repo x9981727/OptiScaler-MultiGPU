@@ -47,7 +47,19 @@ freetype_dst=root/'external/freetype/freetype.lib'
 freetype_dst.parent.mkdir(parents=True,exist_ok=True)
 shutil.copy2(freetype_src,freetype_dst)
 
+# The solution emits the main DLL to x64/Release while the forwarder goes to x64/Release/a.
+# r7 packaging intentionally expects a single directory. Change only the Release|x64 main-project
+# OutDir so the successfully linked OptiScaler.dll lands beside nvngx.dll_dlssnr.dll.
 project=fork_project.read_text(encoding='utf-8-sig')
+release_property_pattern=r'(<PropertyGroup Condition="\'\$\(Configuration\)\|\$\(Platform\)\'==\'Release\|x64\'" Label="Configuration">.*?</PropertyGroup>)'
+matches=re.findall(release_property_pattern,project,re.S)
+if len(matches)!=1: raise RuntimeError(f'Expected one Release|x64 Configuration PropertyGroup, got {len(matches)}')
+group=matches[0]
+if '<OutDir>' in group: raise RuntimeError('Release|x64 Configuration group already defines OutDir; re-audit output path')
+new_group=group.replace('</PropertyGroup>','    <OutDir>$(SolutionDir)x64\\Release\\a\\</OutDir>\n  </PropertyGroup>',1)
+project=project.replace(group,new_group,1)
+fork_project.write_text(project,encoding='utf-8-sig',newline='\n')
+
 release_group=re.search(r'<ItemDefinitionGroup Condition="\'\$\(Configuration\)\|\$\(Platform\)\'==\'Release\|x64\'">(.*?)</ItemDefinitionGroup>',project,re.S)
 if not release_group: raise RuntimeError('Release|x64 project group missing')
 deps_match=re.search(r'<AdditionalDependencies>(.*?)</AdditionalDependencies>',release_group.group(1),re.S)
@@ -81,7 +93,8 @@ for name in ('ScaleColourShader','ScaleMotionShader','ScaleDepthShader','Composi
     exports[name]={'sha256':hashlib.sha256(code.encode()).hexdigest(),'bytes':len(code.encode())}
 report={'backend_sha256':hashlib.sha256(cpp.read_bytes()).hexdigest(),'shaders':exports,
         'windows_minmax_macro_avoided':True,'sm5_uint64_dependency_removed':True,
-        'full_colour_state_restored':True,'dependency_source':'official OptiScaler full shallow clone',
+        'full_colour_state_restored':True,'release_output_aligned_to_packaging_dir':True,
+        'dependency_source':'official OptiScaler full shallow clone',
         'official_dependency_commit':official_commit,'private_link_dependencies_verified':private_deps,
         'freetype_sha256':hashlib.sha256(freetype_dst.read_bytes()).hexdigest(),
         'vulkan_import_lib_source':str(vulkan_source),
