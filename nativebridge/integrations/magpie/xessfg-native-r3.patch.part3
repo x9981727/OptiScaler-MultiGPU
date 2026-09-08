@@ -1,0 +1,152 @@
++	out[8]=r[2]; out[9]=u[2]; out[10]=f[2]; out[11]=0.0f;
++	out[12]=-(p[0]*r[0]+p[1]*r[1]+p[2]*r[2]);
++	out[13]=-(p[0]*u[0]+p[1]*u[1]+p[2]*u[2]);
++	out[14]=-(p[0]*f[0]+p[1]*f[1]+p[2]*f[2]);
++	out[15]=1.0f;
++}
++
+ void XeSSFGPresenter::SetFrameGuidance(
+ 	ID3D11Texture2D* motion,
+ 	FrameGuidanceFrameId frameId,
+@@ -624,6 +765,13 @@
+ 	impl.guidanceFrameId = frameId;
+ 	impl.externalMotionValid = false;
+ 	impl.externalMotionReset = true;
++	impl.nativeGuidanceValid = false;
++	impl.nativeGuidanceReset = true;
++	if (impl.nativeGuidanceEnabled && impl.initFlags != XEFG_SWAPCHAIN_INIT_FLAG_NONE &&
++		!RecreateProxyForNativeFlags(impl, XEFG_SWAPCHAIN_INIT_FLAG_NONE)) {
++		Logger::Get().Error("XeSSFG failed to restore non-inverted fallback mode");
++		return;
++	}
+ 	if (!motion || !impl.motion11 || !impl.motionUav11 || frameId == 0 ||
+ 		frameId <= impl.lastSubmittedGuidanceFrameId) {
+ 		return;
+@@ -662,6 +810,68 @@
+ 
+ }
+ 
++void XeSSFGPresenter::SetNativeFrameGuidance(
++	ID3D11Texture2D* motion,
++	ID3D11Texture2D* depth,
++	const nb::Camera& camera,
++	FrameGuidanceFrameId frameId,
++	bool requiresHistoryReset,
++	const RECT& destinationRect
++) noexcept {
++	if (!_impl || !_impl->nativeGuidanceEnabled) return;
++	Impl& impl = *_impl;
++	impl.guidanceFrameId = frameId;
++	impl.externalMotionValid = false;
++	impl.nativeGuidanceValid = false;
++	impl.externalMotionReset = true;
++	impl.nativeGuidanceReset = true;
++	if (!motion || !depth || !impl.motion11 || !impl.motionUav11 || !impl.depth11 ||
++		!impl.depthUav11 || frameId == 0 || frameId <= impl.lastSubmittedGuidanceFrameId ||
++		(camera.flags & nb::Orthographic)) return;
++	D3D11_TEXTURE2D_DESC motionDesc{}, depthDesc{};
++	motion->GetDesc(&motionDesc);
++	depth->GetDesc(&depthDesc);
++	const LONG width = destinationRect.right - destinationRect.left;
++	const LONG height = destinationRect.bottom - destinationRect.top;
++	if (motionDesc.Format != DXGI_FORMAT_R16G16_FLOAT ||
++		depthDesc.Format != DXGI_FORMAT_R32_FLOAT || motionDesc.Width != depthDesc.Width ||
++		motionDesc.Height != depthDesc.Height || destinationRect.left < 0 ||
++		destinationRect.top < 0 || destinationRect.right > static_cast<LONG>(impl.width) ||
++		destinationRect.bottom > static_cast<LONG>(impl.height) ||
++		width != static_cast<LONG>(motionDesc.Width) ||
++		height != static_cast<LONG>(motionDesc.Height)) {
++		Logger::Get().Warn("XeSSFG NativeBridge depth/motion extent mismatch; native guidance dropped");
++		return;
++	}
++	uint32_t desiredFlags = XEFG_SWAPCHAIN_INIT_FLAG_NONE;
++	if (camera.flags & nb::DepthInverted) desiredFlags |= XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH;
++	if (!RecreateProxyForNativeFlags(impl, desiredFlags)) {
++		Logger::Get().Error("XeSSFG NativeBridge depth convention reinitialization failed");
++		return;
++	}
++	static constexpr float ZERO[4]{};
++	const float FAR_DEPTH[4]{
++		(camera.flags & nb::DepthInverted) ? 0.0f : 1.0f,
++		(camera.flags & nb::DepthInverted) ? 0.0f : 1.0f,
++		(camera.flags & nb::DepthInverted) ? 0.0f : 1.0f,
++		(camera.flags & nb::DepthInverted) ? 0.0f : 1.0f };
++	impl.context11->ClearUnorderedAccessViewFloat(impl.motionUav11.get(), ZERO);
++	impl.context11->ClearUnorderedAccessViewFloat(impl.depthUav11.get(), FAR_DEPTH);
++	impl.context11->CopySubresourceRegion(impl.motion11.get(), 0,
++		static_cast<UINT>(destinationRect.left), static_cast<UINT>(destinationRect.top), 0,
++		motion, 0, nullptr);
++	impl.context11->CopySubresourceRegion(impl.depth11.get(), 0,
++		static_cast<UINT>(destinationRect.left), static_cast<UINT>(destinationRect.top), 0,
++		depth, 0, nullptr);
++	impl.nativeCamera = camera;
++	impl.externalMotionValid = true;
++	impl.nativeGuidanceValid = true;
++	impl.externalMotionReset = requiresHistoryReset;
++	impl.nativeGuidanceReset = requiresHistoryReset ||
++		(camera.flags & nb::Reset) ||
++		(impl.lastSubmittedGuidanceFrameId != 0 && frameId != impl.lastSubmittedGuidanceFrameId + 1);
++}
++
+ bool XeSSFGPresenter::SetBaseFrameRateLimit(double baseFPS) noexcept {
+ 	if (!_impl) return false;
+ 	auto& impl = *_impl;
+@@ -853,20 +1063,32 @@
+ 		depth.type = XEFG_SWAPCHAIN_RES_DEPTH;
+ 		depth.validity = XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT;
+ 		depth.resourceSize = { impl.width, impl.height };
+-		depth.pResource = impl.flatDepth12.get();
+-		depth.incomingState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++		depth.pResource = impl.nativeGuidanceValid ? impl.depth12.get() : impl.flatDepth12.get();
++		depth.incomingState = impl.nativeGuidanceValid ?
++			D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+ 		if (XeFGSucceeded(result)) {
+ 			result = xefgSwapChainD3D12TagFrameResource(
+ 				impl.xefg, nullptr, impl.frameId, &depth);
+ 		}
+ 
+ 		xefg_swapchain_frame_constant_data_t constants{};
+-		SetIdentity(constants.viewMatrix);
+-		SetIdentity(constants.projectionMatrix);
+-		constants.motionVectorScaleX = 1.0f;
+-		constants.motionVectorScaleY = 1.0f;
++		if (impl.nativeGuidanceValid) {
++			BuildNativeViewMatrix(impl.nativeCamera, constants.viewMatrix);
++			std::memcpy(constants.projectionMatrix, impl.nativeCamera.viewToClip.m,
++				sizeof(constants.projectionMatrix));
++			constants.jitterOffsetX = impl.nativeCamera.jitter[0];
++			constants.jitterOffsetY = impl.nativeCamera.jitter[1];
++			constants.motionVectorScaleX = impl.nativeCamera.rawMotionToPixels[0];
++			constants.motionVectorScaleY = impl.nativeCamera.rawMotionToPixels[1];
++		} else {
++			SetIdentity(constants.viewMatrix);
++			SetIdentity(constants.projectionMatrix);
++			constants.motionVectorScaleX = 1.0f;
++			constants.motionVectorScaleY = 1.0f;
++		}
+ 		constants.resetHistory =
+-			(impl.resetHistory || (impl.externalMotionEnabled && impl.externalMotionReset)) ? 1u : 0u;
++			(impl.resetHistory || (impl.externalMotionEnabled && impl.externalMotionReset) ||
++			 (impl.nativeGuidanceEnabled && impl.nativeGuidanceReset)) ? 1u : 0u;
+ 		const auto now = std::chrono::steady_clock::now();
+ 		if (impl.lastPresent.time_since_epoch().count() != 0) {
+ 			if (now - impl.lastPresent >= std::chrono::milliseconds(500)) constants.resetHistory = 1;
+@@ -947,6 +1169,8 @@
+ 	}
+ 	impl.externalMotionValid = false;
+ 	impl.externalMotionReset = true;
++	impl.nativeGuidanceValid = false;
++	impl.nativeGuidanceReset = true;
+ 	++impl.frameId;
+ 	return SUCCEEDED(hr);
+ }
+@@ -1007,11 +1231,13 @@
+ XeSSFGPresenter::XeSSFGPresenter(
+ 	XeSSFGVariant variant,
+ 	uint32_t requestedMultiplier,
+-	bool useExternalMotion
++	bool useExternalMotion,
++	bool useNativeGuidance
+ ) :
+ 	_variant(variant),
+ 	_requestedMultiplier(requestedMultiplier),
