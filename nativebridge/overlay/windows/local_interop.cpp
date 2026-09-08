@@ -53,6 +53,20 @@ HRESULT CreateSharedTexturePair(
     if (FAILED(hr)) return hr;
     return device12->OpenSharedHandle(handle.value, IID_PPV_ARGS(texture12.ReleaseAndGetAddressOf()));
 }
+
+HRESULT CreateSharedFencePair(
+    ID3D11Device5* device11,
+    ID3D12Device* device12,
+    ComPtr<ID3D11Fence>& fence11,
+    ComPtr<ID3D12Fence>& fence12) noexcept {
+    HRESULT hr = device11->CreateFence(
+        0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(fence11.ReleaseAndGetAddressOf()));
+    if (FAILED(hr)) return hr;
+    ScopedHandle handle;
+    hr = fence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &handle.value);
+    if (FAILED(hr)) return hr;
+    return device12->OpenSharedHandle(handle.value, IID_PPV_ARGS(fence12.ReleaseAndGetAddressOf()));
+}
 } // namespace
 
 HRESULT LocalInteropFrame::Create(
@@ -71,27 +85,37 @@ HRESULT LocalInteropFrame::Create(
             device11, device12, layout.planes[i], textures11_[i], textures12_[i]);
         if (FAILED(hr)) return hr;
     }
-
-    HRESULT hr = device11->CreateFence(
-        0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(fence11_.ReleaseAndGetAddressOf()));
+    HRESULT hr = CreateSharedFencePair(device11, device12, ready11_, ready12_);
     if (FAILED(hr)) return hr;
-    ScopedHandle fenceHandle;
-    hr = fence11_->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle.value);
-    if (FAILED(hr)) return hr;
-    return device12->OpenSharedHandle(
-        fenceHandle.value, IID_PPV_ARGS(fence12_.ReleaseAndGetAddressOf()));
+    return CreateSharedFencePair(device11, device12, consumed11_, consumed12_);
 }
 
-HRESULT LocalInteropFrame::Signal(ID3D12CommandQueue* queue, uint64_t value) noexcept {
-    if (!queue || !device12_ || !fence12_ || !value || value == UINT64_MAX || value <= lastSignal_)
-        return E_INVALIDARG;
+HRESULT LocalInteropFrame::_ValidateQueue(ID3D12CommandQueue* queue) const noexcept {
+    if (!queue || !device12_) return E_INVALIDARG;
     if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return E_INVALIDARG;
     ComPtr<ID3D12Device> owner;
-    HRESULT hr = queue->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()));
+    const HRESULT hr = queue->GetDevice(IID_PPV_ARGS(owner.GetAddressOf()));
     if (FAILED(hr)) return hr;
-    if (owner.Get() != device12_.Get()) return E_INVALIDARG;
-    hr = queue->Signal(fence12_.Get(), value);
-    if (SUCCEEDED(hr)) lastSignal_ = value;
+    return owner.Get() == device12_.Get() ? S_OK : E_INVALIDARG;
+}
+
+HRESULT LocalInteropFrame::WaitConsumed(ID3D12CommandQueue* queue, uint64_t value) noexcept {
+    if (!consumed12_ || !value || value == UINT64_MAX || value <= lastWaitedConsumed_)
+        return E_INVALIDARG;
+    HRESULT hr = _ValidateQueue(queue);
+    if (FAILED(hr)) return hr;
+    hr = queue->Wait(consumed12_.Get(), value);
+    if (SUCCEEDED(hr)) lastWaitedConsumed_ = value;
+    return hr;
+}
+
+HRESULT LocalInteropFrame::SignalReady(ID3D12CommandQueue* queue, uint64_t value) noexcept {
+    if (!ready12_ || !value || value == UINT64_MAX || value <= lastReady_)
+        return E_INVALIDARG;
+    HRESULT hr = _ValidateQueue(queue);
+    if (FAILED(hr)) return hr;
+    hr = queue->Signal(ready12_.Get(), value);
+    if (SUCCEEDED(hr)) lastReady_ = value;
     return hr;
 }
 
