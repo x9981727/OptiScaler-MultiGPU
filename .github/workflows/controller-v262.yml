@@ -1,0 +1,119 @@
+name: XeFG v26.2 controller autofocus hotfix
+on:
+  push:
+    branches: [fix/v26-2-autofocus-handoff]
+    paths: ['v262/**', '.github/workflows/controller-v262.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+      - uses: actions/download-artifact@v4
+        with:
+          name: XeFG-v26.1-controller-hotfix
+          run-id: 34204944534
+          github-token: ${{ github.token }}
+          path: prior
+      - name: Verify v26.1 source provenance and apply v26.2 patch
+        shell: powershell
+        run: |
+          @'
+          from pathlib import Path
+          import zipfile,hashlib,shutil
+          p=Path('prior/XeFG-v26.1-controller-CI.zip')
+          assert p.is_file(),p
+          assert hashlib.sha256(p.read_bytes()).hexdigest()=='9cb45b81e27ad694f16f9956d16166ec87cd0957fb8234c61e01b883ca60695c'
+          with zipfile.ZipFile(p) as z:
+              hashes={
+                'game_feedback.py':'01ce1ac2faf8c8eba25fe1543abfffd9a7119566205c2b6c70c8bfc34ae6650a',
+                'correlation.py':'9d4afb23c3374b262acd4f7a8022d52d25ea178a7173a631c6969e14172ca5d3',
+                'test_game.py':'048089981ddbb688ca7eb640f82038477730abeea3a6de0e15ce927ea32459c8',
+                'test_correlation.py':'882e0a41c17acd3abc97e772f75ca7cded70be15646e97ea198f46889cca6a11',
+                'install_game.py':'a6f9e6c9d6b1f857c22b35f1c11820b67368a23b6f4714fd06d4f2cc95147212'
+              }
+              for name,h in hashes.items():
+                  data=z.read('source/'+name).replace(b'\r\n',b'\n')
+                  assert hashlib.sha256(data).hexdigest()==h,(name,hashlib.sha256(data).hexdigest())
+                  (Path('v262')/name).write_bytes(data)
+          '@ | Set-Content -Encoding UTF8 verify-v262.py
+          python verify-v262.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python v262\patch_focus.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run retained and v26.2 Windows regressions
+        shell: powershell
+        run: |
+          Push-Location v262
+          cmd /c "python -m unittest -v test_game test_correlation test_focus_v262 > windows-python-results.txt 2>&1"
+          $code=$LASTEXITCODE
+          Get-Content windows-python-results.txt
+          Pop-Location
+          if ($code -ne 0) { exit $code }
+      - name: Build standalone x64 controller
+        shell: powershell
+        run: |
+          python -m pip install pyinstaller==6.11.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --clean --noconfirm --onefile --name AutoPacing --paths v262 v262\game_feedback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\AutoPacing.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package controller, PresentMon, readable source and evidence
+        shell: powershell
+        run: |
+          @'
+          from pathlib import Path
+          import zipfile,hashlib,shutil,json,os,struct
+          prior=Path('prior/XeFG-v26.1-controller-CI.zip')
+          stage=Path('controller-v262-package');(stage/'tools').mkdir(parents=True);(stage/'source').mkdir();(stage/'tests').mkdir()
+          exe=Path('dist/AutoPacing.exe');data=exe.read_bytes();pe=struct.unpack_from('<I',data,60)[0]
+          assert data[:2]==b'MZ' and data[pe:pe+6]==b'PE\0\0\x64\x86'
+          shutil.copyfile(exe,stage/'tools/AutoPacing.exe')
+          with zipfile.ZipFile(prior) as z:
+              (stage/'tools/PresentMon-2.5.1-x64.exe').write_bytes(z.read('tools/PresentMon-2.5.1-x64.exe'))
+              for name in z.namelist():
+                  if name.startswith('licenses/') and not name.endswith('/'):
+                      q=stage/name;q.parent.mkdir(parents=True,exist_ok=True);q.write_bytes(z.read(name))
+          for p in Path('v262').glob('*.py'):shutil.copyfile(p,stage/'source'/p.name)
+          shutil.copyfile('v262/1-AutoPacing-v26.2.cmd',stage/'1-AutoPacing-v26.2.cmd')
+          shutil.copyfile('v262/README-zhTW.txt',stage/'README-zhTW.txt')
+          shutil.copyfile('.github/workflows/controller-v262.yml',stage/'source/controller-v262.yml')
+          shutil.copyfile('v262/windows-python-results.txt',stage/'tests/windows-python-results.txt')
+          manifest={
+            'revision':'26.2','kind':'controller_only_autofocus_hotfix_no_game_dll','commit':os.environ['GITHUB_SHA'],'run_id':os.environ['GITHUB_RUN_ID'],
+            'prior_controller_artifact_sha256':'9cb45b81e27ad694f16f9956d16166ec87cd0957fb8234c61e01b883ca60695c',
+            'unchanged_game_dll_sha256':'e886b0fef626aec15bf9f833bbac4f4aaed39c0c44aaee8edd04919971a99be7',
+            'windows_tests':41,'controller_sha256':hashlib.sha256(data).hexdigest(),
+            'focus_behavior':'one-shot best-effort SetForegroundWindow to visible wwm.exe window; fail closed if not foreground',
+            'pacing_algorithm_changed':False,'game_dll_changed':False,'game_ini_modified':False,'game_hardware_retested':False,
+            'python_version':'3.11.9','pyinstaller_version':'6.11.1'}
+          (stage/'BUILD-MANIFEST.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+          with zipfile.ZipFile('XeFG-v26.2-controller-CI.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(stage.rglob('*')):
+                  if p.is_file():z.write(p,p.relative_to(stage))
+          print(json.dumps(manifest,indent=2))
+          '@ | Set-Content -Encoding UTF8 package-v262.py
+          python package-v262.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XeFG-v26.2-controller-hotfix
+          path: XeFG-v26.2-controller-CI.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: XeFG-v26.2-test-evidence
+          path: v262/windows-python-results.txt
+          if-no-files-found: warn
+          retention-days: 14
