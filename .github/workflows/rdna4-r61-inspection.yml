@@ -1,0 +1,24 @@
+name: RDNA4 r6.1 output inspection
+on:
+  push:
+    branches: [dlssnr-rdna4-r61-timing-boundary]
+    paths: ['rdna4/autolab_r61/inspect_output.py', '.github/workflows/rdna4-r61-inspection.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y llvm-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - run: python rdna4/autolab_r61/inspect_output.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r61-output-parameters
+          path: rdna4/autolab_r61/reports/
+          if-no-files-found: error
+          retention-days: 14
