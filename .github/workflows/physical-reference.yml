@@ -32,7 +32,8 @@ jobs:
         shell: pwsh
         run: |
           $out='reference-build/bin/Release'
-          Copy-Item intel-reference/LICENSE "$out/INTEL-SDK-LICENSE.txt"
+          Copy-Item intel-reference/LICENSE.txt "$out/INTEL-SDK-LICENSE.txt"
+          Copy-Item intel-reference/third-party-programs.txt "$out/third-party-programs.txt"
           Copy-Item intel-reference/samples/basic_sample_frame_generation/README.md "$out/REFERENCE-README.md"
           @'
           Isolated Intel XeFG reference application, NOT an OptiScaler fix.
