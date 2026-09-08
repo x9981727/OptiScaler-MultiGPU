@@ -33,8 +33,8 @@ def patch_hooks(s: str) -> str:
     constants_new = '''    LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);\n\n    NativeBridgeCapture::OnConstants(values, static_cast<uint32_t>(frame), static_cast<uint32_t>(viewport));\n    State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);'''
     s = once(s, constants_anchor, constants_new)
 
-    tag_anchor = '''    LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));\n\n    if (State::Instance().activeFgInput == FGInput::DLSSG &&'''
-    tag_new = '''    LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));\n\n    NativeBridgeCapture::OnTags(\n        static_cast<uint32_t>(frame), static_cast<uint32_t>(viewport), resources, numResources,\n        reinterpret_cast<ID3D12GraphicsCommandList*>(cmdBuffer));\n\n    if (State::Instance().activeFgInput == FGInput::DLSSG &&'''
+    tag_anchor = '''    if (resources == nullptr)\n    {\n        LOG_WARN("Game trying to remove a tag");\n        return o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);\n    }\n\n    LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));\n\n    if (State::Instance().activeFgInput == FGInput::DLSSG &&'''
+    tag_new = '''    if (resources == nullptr)\n    {\n        LOG_WARN("Game trying to remove a tag");\n        return o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);\n    }\n\n    LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));\n\n    NativeBridgeCapture::OnTags(\n        static_cast<uint32_t>(frame), static_cast<uint32_t>(viewport), resources, numResources,\n        reinterpret_cast<ID3D12GraphicsCommandList*>(cmdBuffer));\n\n    if (State::Instance().activeFgInput == FGInput::DLSSG &&'''
     s = once(s, tag_anchor, tag_new)
 
     marker_anchor = '''sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::FrameToken& frame)\n{\n'''
@@ -51,8 +51,6 @@ def patch_hooks(s: str) -> str:
     return s
 
 def patch_project(s: str) -> str:
-    # OptiScaler x64 already exposes $(ProjectDir), so native_bridge/... resolves.
-    # Advapi32 is required by the authenticated named-pipe security/token code.
     s = s.replace('d3d12.lib;', 'd3d12.lib;Advapi32.lib;')
     group = '''  <ItemGroup>\n    <ClInclude Include="native_bridge\\NativeBridgeCapture.h" />\n    <ClInclude Include="native_bridge\\contract.hpp" />\n    <ClInclude Include="native_bridge\\ledger.hpp" />\n    <ClInclude Include="native_bridge\\wire.hpp" />\n    <ClInclude Include="native_bridge\\windows\\ipc_pipe.hpp" />\n    <ClInclude Include="native_bridge\\windows\\runtime_session.hpp" />\n    <ClInclude Include="native_bridge\\windows\\session_protocol.hpp" />\n    <ClInclude Include="native_bridge\\windows\\transport_d3d12.hpp" />\n    <ClCompile Include="native_bridge\\NativeBridgeCapture.cpp" />\n    <ClCompile Include="native_bridge\\contract.cpp" />\n    <ClCompile Include="native_bridge\\ledger.cpp" />\n    <ClCompile Include="native_bridge\\wire.cpp" />\n    <ClCompile Include="native_bridge\\windows\\ipc_pipe.cpp" />\n    <ClCompile Include="native_bridge\\windows\\runtime_session.cpp" />\n    <ClCompile Include="native_bridge\\windows\\session_protocol.cpp" />\n    <ClCompile Include="native_bridge\\windows\\transport_d3d12.cpp" />\n  </ItemGroup>\n'''
     return once(s, '</Project>', group + '</Project>')
