@@ -25,6 +25,8 @@ with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
 '@
 $exporter=Join-Path $reports 'export-code.py'
 [IO.File]::WriteAllText($exporter,$codeExport)
+python $exporter $source (Join-Path $dist 'expanded-NativeBridge-source-for-review.zip')
+if($LASTEXITCODE){throw 'NativeBridge source export failed'}
 python $exporter $MagpieRoot (Join-Path $dist 'pinned-Magpie-code-for-review.zip')
 if($LASTEXITCODE){throw 'Source export failed'}
 $op=Join-Path $root '_optiscaler'
