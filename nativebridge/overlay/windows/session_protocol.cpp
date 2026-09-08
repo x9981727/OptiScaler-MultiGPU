@@ -21,19 +21,17 @@ struct Reader {
 bool validAdapter(AdapterId a){return a.low!=0 || a.high!=0;}
 bool allZero(const std::byte* begin,const std::byte* end){return std::all_of(begin,end,[](std::byte b){return b==std::byte{};});}
 }
-
 Result MakeHelloMessage(const Hello& h, ipc::Message& out) noexcept {
     if((h.role!=Role::ConsumerRequest && h.role!=Role::ProducerAccept) || !validAdapter(h.processingAdapter) ||
        !valid_color_format(h.colorFormat)) return Result::Values;
     if(h.role==Role::ConsumerRequest) {
         if(h.session || h.generation || validAdapter(h.renderAdapter)) return Result::Values;
-    } else if(!h.session || !h.generation || !h.viewport || !validAdapter(h.renderAdapter) ||
-              !valid_extent(h.extent)) return Result::Values;
+    } else if(!h.session || !h.generation || !validAdapter(h.renderAdapter) || !valid_extent(h.extent) || h.viewport==AnyViewport)
+        return Result::Values;
     ipc::Message m{};m.kind=ipc::Kind::Hello;m.length=uint32_t(HelloBytes);Writer w{m.payload.data()};
     w.u32(HelloMagic);w.u32(ProtocolVersion);w.u32(uint32_t(h.role));w.u32(h.flags);
     w.u64(h.session);w.u64(h.generation);w.u64(h.viewport);w.adapter(h.renderAdapter);w.adapter(h.processingAdapter);
-    w.u32(h.extent.width);w.u32(h.extent.height);w.u32(uint32_t(h.colorFormat));w.u32(kSlotCount);
-    out=m;return Result::Ok;
+    w.u32(h.extent.width);w.u32(h.extent.height);w.u32(uint32_t(h.colorFormat));w.u32(kSlotCount);out=m;return Result::Ok;
 }
 Result ParseHelloMessage(const ipc::Message& m, Hello& out) noexcept {
     if(m.kind!=ipc::Kind::Hello)return Result::Kind;if(m.length!=HelloBytes)return Result::Length;
@@ -80,5 +78,4 @@ Result ParseReleaseMessage(const ipc::Message& m,Token& out) noexcept {
     if(m.kind!=ipc::Kind::Release)return Result::Kind;if(m.length)return Result::Length;if(m.slot>=kSlotCount||!m.sequence)return Result::Values;
     out={m.slot,m.sequence};return Result::Ok;
 }
-
 }
