@@ -16,9 +16,8 @@ Copy-Item $magpieSource (Join-Path $runtime 'Magpie') -Recurse
 $producer=Join-Path $runtime 'OptiScaler-Producer'
 New-Item -ItemType Directory -Force $producer | Out-Null
 if(!(Test-Path $OptiScalerOutput)){throw 'OptiScaler output directory missing'}
-$allowed=@('.dll','.ini','.json','.bat','.config','.txt')
-Get-ChildItem $OptiScalerOutput -Recurse -File | Where-Object {$allowed -contains $_.Extension.ToLowerInvariant()} | ForEach-Object {
-    $relative=$_.FullName.Substring($OptiScalerOutput.Length).TrimStart('\\','/')
+Get-ChildItem $OptiScalerOutput -Recurse -File | Where-Object {$_.Extension -ine '.pdb'} | ForEach-Object {
+    $relative=$_.FullName.Substring($OptiScalerOutput.Length).TrimStart('\','/')
     $target=Join-Path $producer $relative
     New-Item -ItemType Directory -Force (Split-Path $target -Parent) | Out-Null
     Copy-Item $_.FullName $target -Force
@@ -93,7 +92,7 @@ $manifest=[ordered]@{
     sha256=@{}
 }
 Get-ChildItem $runtime -Recurse -File | ForEach-Object {
-    $relative=$_.FullName.Substring($runtime.Length).TrimStart('\\','/').Replace('\\','/')
+    $relative=$_.FullName.Substring($runtime.Length).TrimStart('\','/').Replace('\','/')
     $manifest.sha256[$relative]=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $runtime 'manifest.json') -Encoding UTF8
