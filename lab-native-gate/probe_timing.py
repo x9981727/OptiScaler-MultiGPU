@@ -1,5 +1,5 @@
 from pathlib import Path
-import sys,subprocess
+import sys,subprocess,shutil
 root=Path(sys.argv[1]); p=root/'basic_sample.cpp';s=p.read_text(encoding='utf-8-sig')
 def replace(text,old,new):
  if text.count(old)!=1:raise RuntimeError('Timing probe anchor: '+old[:100])
@@ -42,5 +42,9 @@ extern "C" void DumpSourceRecords(){
 }
 '''
 n.write_text(c,encoding='utf-8');print('Explicit source cadence records and frame-time hint control prepared.')
-for step in ('precision.py','resource_gate.py','output_dma.py','queue_isolation.py'):
+for step in ('precision.py','resource_gate.py','output_dma.py','queue_isolation.py','single_copy.py'):
  subprocess.run([sys.executable,str(Path(__file__).with_name(step)),str(root)],check=True)
+probe=Path(__file__).with_name('composition_probe.cpp')
+(root/'composition_probe.cpp').write_text('#include <initializer_list>\n'+probe.read_text(encoding='utf-8'),encoding='utf-8')
+with (root/'CMakeLists.txt').open('a',encoding='utf-8') as f:
+ f.write('\nadd_executable(composition_capability_probe composition_probe.cpp)\nset_property(TARGET composition_capability_probe PROPERTY CXX_STANDARD 17)\ntarget_link_libraries(composition_capability_probe PRIVATE d3d11 d3d12 dxgi dcomp)\n')
