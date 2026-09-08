@@ -27,7 +27,8 @@ if(WIN32)
     windows/transport_d3d12.cpp
     windows/ipc_pipe.cpp
     windows/local_interop.cpp
-    windows/session_protocol.cpp)
+    windows/session_protocol.cpp
+    windows/runtime_session.cpp)
   target_include_directories(native_bridge_d3d12 PUBLIC windows)
   target_link_libraries(native_bridge_d3d12 PUBLIC native_bridge_core d3d12 d3d11 dxgi advapi32)
   target_compile_definitions(native_bridge_d3d12 PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
@@ -43,6 +44,11 @@ if(WIN32)
   target_include_directories(native_bridge_session_protocol_tests PRIVATE tests)
   target_link_libraries(native_bridge_session_protocol_tests PRIVATE native_bridge_d3d12)
   add_test(NAME windows_session_protocol COMMAND native_bridge_session_protocol_tests)
+  add_executable(native_bridge_runtime_session_tests windows/runtime_session_tests.cpp)
+  target_include_directories(native_bridge_runtime_session_tests PRIVATE tests)
+  target_link_libraries(native_bridge_runtime_session_tests PRIVATE native_bridge_d3d12 d3d12 dxgi)
+  add_test(NAME windows_runtime_session COMMAND native_bridge_runtime_session_tests)
+  set_tests_properties(windows_runtime_session PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
   add_executable(native_bridge_adapters windows/adapters.cpp)
   target_link_libraries(native_bridge_adapters PRIVATE dxgi)
   add_executable(native_bridge_d3d_runtime_selftest windows/d3d_runtime_selftest.cpp)
