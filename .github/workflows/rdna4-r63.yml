@@ -1,0 +1,175 @@
+name: RDNA4 r6.3 Swin scheduling candidates
+on:
+  push:
+    branches: [dlssnr-rdna4-r63-swin-scheduling]
+    paths: ['rdna4/schedule_r63/**', '.github/workflows/rdna4-r63.yml']
+permissions:
+  contents: read
+concurrency:
+  group: r63-swin-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler and ELF inspection dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Verify gfx1201 descriptor bit and test scheduling policy
+        run: python rdna4/schedule_r63/build_manifest.py
+      - name: Rebuild and verify inherited Head dependency
+        run: |
+          python rdna4/layer_r4/build_layer.py
+          echo '62c8ecf66e4290ffbe22230a376b475ef482807fe05c46b957457bff5826cffe  rdna4/layer_r4/build/head_r4_gfx1201.hsaco' | sha256sum -c -
+      - name: Prepare exact tested predecessor and r6.3 source
+        run: |
+          python rdna4/forward_r5/prepare_r52.py
+          python rdna4/forward_r5/build_support.py
+          python rdna4/forward_r5/test_r52_build.py
+          python rdna4/autolab/prepare_autolab.py
+          python rdna4/autolab_r61/prepare_r61.py
+          python rdna4/autolab_r62/prepare_r62.py
+          python rdna4/schedule_r63/prepare_r63.py
+      - name: Execute inherited numerical and timestamp regressions
+        run: |
+          python rdna4/autolab/run_cpu_lab.py
+          python rdna4/autolab_r61/test_measurement.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: R63-build-inputs
+          path: |
+            rdna4/layer_r4/build/head_r4_gfx1201.hsaco
+            rdna4/layer_r4/build/compile-report.json
+            rdna4/layer_r4/candidate_hash.hpp
+            rdna4/forward_r5/forward_r63.cpp
+            rdna4/forward_r5/forward_r62.cpp
+            rdna4/forward_r5/forward_r61.cpp
+            rdna4/forward_r5/forward_autolab.cpp
+            rdna4/forward_r5/forward_delivery.cpp
+            rdna4/forward_r5/plan_core.hpp
+            rdna4/forward_r5/r52_original_plan_core.hpp
+            rdna4/forward_r5/deps/
+            rdna4/forward_r5/build/*.json
+            rdna4/forward_r5/build/fixture-*.zip
+            rdna4/autolab/reports/*.json
+            rdna4/autolab_r61/reports/*.json
+            rdna4/schedule_r63/patch_manifest.hpp
+            rdna4/schedule_r63/reports/*.json
+          if-no-files-found: error
+          retention-days: 14
+  windows:
+    needs: linux
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: R63-build-inputs
+          path: device
+      - name: Compile actual r6.3 Windows x64 executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force package,package/reports | Out-Null
+          Copy-Item device/layer_r4/candidate_hash.hpp rdna4/layer_r4/
+          Copy-Item device/forward_r5/*.cpp,device/forward_r5/*.hpp rdna4/forward_r5/
+          Copy-Item device/forward_r5/deps rdna4/forward_r5/ -Recurse
+          Copy-Item device/schedule_r63/patch_manifest.hpp rdna4/schedule_r63/
+          $vswhere="${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) {throw 'MSVC toolchain unavailable'}
+          $vars=Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          @('@echo off',('call "'+$vars+'"'),'if errorlevel 1 exit /b 1',
+            'cl /nologo /O2 /MT /c /TC rdna4\forward_r5\deps\puff.c /Fo:package\puff.obj','if errorlevel 1 exit /b 1',
+            'cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\forward_r5\forward_r63.cpp package\puff.obj /Fe:package\rdna4-swin-r63.exe /Fo:package\runner.obj',
+            'exit /b %errorlevel%') | Set-Content compile-r63.cmd -Encoding ascii
+          & cmd /d /c compile-r63.cmd
+          if ($LASTEXITCODE -ne 0) {throw 'r6.3 compilation failed'}
+      - name: Execute CPU ZIP policies and reject invalid input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($mode in @('stored','deflated')) {
+            & ./package/rdna4-swin-r63.exe --cpu-self-test --fixture "device/forward_r5/build/fixture-$mode.zip" --output "package/reports/windows-$mode.json"
+            if ($LASTEXITCODE -ne 0) {throw "CPU fixture failed: $mode"}
+            $result=Get-Content "package/reports/windows-$mode.json" -Raw | ConvertFrom-Json
+            if ($result.gpu_attempted -or $result.delivery_revision -ne 'r6.3' -or $result.r63_schedule_policy_checks -lt 250 -or !$result.cpu_zip_fixture_passed) {throw 'Incorrect CPU status'}
+            if ($result.status -ne 'cpu_tests_passed_original_plan_and_gpu_not_tested') {throw 'Unexpected CPU status'}
+            Copy-Item rdna4-r63-console.txt "package/reports/windows-$mode-console.txt"
+          }
+          & ./package/rdna4-swin-r63.exe --output package/reports/rejected-cli.json --this-must-fail
+          if ($LASTEXITCODE -eq 0) {throw 'Bad CLI accepted'}
+          $rejected=Get-Content package/reports/rejected-cli.json -Raw | ConvertFrom-Json
+          if ($rejected.status -ne 'failed' -or $rejected.gpu_attempted) {throw 'Malformed CLI rejection failed'}
+          & ./package/rdna4-swin-r63.exe --output package/reports/rejected-plan.json --plan device/forward_r5/build/fixture-stored.zip
+          if ($LASTEXITCODE -eq 0) {throw 'Nonoriginal checkpoint accepted'}
+          $rejected=Get-Content package/reports/rejected-plan.json -Raw | ConvertFrom-Json
+          if ($rejected.status -ne 'failed' -or $rejected.gpu_attempted -or $rejected.plan_validation_passed) {throw 'Wrong plan rejection status'}
+          if (!(Test-Path rdna4-r63-console.txt) -or (Get-Item rdna4-r63-console.txt).Length -eq 0) {throw 'No live console log'}
+          Copy-Item rdna4-r63-console.txt package/reports/rejected-plan-console.txt
+          exit 0
+      - name: Package executable, exact sources, report scopes and hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force package/source,package/source/layer_r4,package/source/tests,package/Licenses | Out-Null
+          foreach ($folder in @('forward_r5','autolab','autolab_r61','autolab_r62','schedule_r63')) {
+            New-Item -ItemType Directory -Force "package/source/$folder" | Out-Null
+            Get-ChildItem "rdna4/$folder" -File | Where-Object {$_.Extension -in '.hpp','.cpp','.py'} | Copy-Item -Destination "package/source/$folder/"
+            if (Test-Path "device/$folder/reports") {
+              New-Item -ItemType Directory -Force "package/reports/$folder" | Out-Null
+              Copy-Item "device/$folder/reports/*.json" "package/reports/$folder/"
+            }
+          }
+          Copy-Item rdna4/forward_r5/deps package/source/forward_r5/ -Recurse
+          Copy-Item device/forward_r5/build/*.json package/reports/
+          Copy-Item device/layer_r4/build/compile-report.json package/reports/
+          Copy-Item device/layer_r4/build/head_r4_gfx1201.hsaco package/
+          Copy-Item rdna4/layer_r4/head_direct.cl,rdna4/layer_r4/head_contract.hpp,rdna4/layer_r4/candidate_hash.hpp,rdna4/layer_r4/build_layer.py package/source/layer_r4/
+          Copy-Item rdna4/tests/linear_test.cpp package/source/tests/
+          Copy-Item rdna4/schedule_r63/README_zh-TW.md package/README_zh-TW.md
+          Copy-Item rdna4/schedule_r63/RUN_R63.cmd package/
+          Copy-Item rdna4/layer_r4/LICENSE.txt package/Licenses/INDEPENDENT_SOURCE_MIT.txt
+          Copy-Item rdna4/forward_r5/deps/JSON_LICENSE.MIT package/Licenses/
+          Copy-Item rdna4/forward_r5/deps/puff.h package/Licenses/PUFF_LICENSE_AND_HEADER.txt
+          Copy-Item .github/workflows/rdna4-r63.yml package/source/
+          Remove-Item package/*.obj -ErrorAction SilentlyContinue
+          $manifest=Get-Content device/schedule_r63/reports/scheduling-manifest.json -Raw | ConvertFrom-Json
+          @{
+            revision='r6.3';commit=$env:GITHUB_SHA;run_id=$env:GITHUB_RUN_ID
+            repository='x9981727/OptiScaler-MultiGPU';branch='dlssnr-rdna4-r63-swin-scheduling'
+            compiled_windows_x64_executable=$true;actual_windows_cpu_zip_and_rejection_tests_passed=$true
+            linux_scheduling_policy_asan_ubsan_tests_passed=$true;gfx1201_assembler_bit_verified=$true
+            original_gpu_module_read_as_data_in_ci=$true;original_instruction_bytes_changed=$false
+            changed_original_module_bytes=$manifest.changed_byte_count
+            alternate_module_sha256=$manifest.candidate_code_sha256
+            original_full_checkpoint_read_in_ci=$false;gpu_executed_in_ci=$false
+            hardware_scheduler_register_read_back=$false
+            new_swin_math_kernel=$false;swin_scheduling_candidates=$true
+            original_head_in_all_timed_modes=$true;timed_experimental_control=1.0
+            control_is_verified_game_setting=$false;training_rounds=36;holdout_rounds=30
+            measured_gpu_speedup=$false;game_tested=$false;game_release_approved=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root=(Resolve-Path package).Path
+          $lines=Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$_.FullName.Substring($root.Length+1).Replace('\','/')
+          }
+          $lines | Set-Content package/SHA256SUMS.txt -Encoding ascii
+          foreach ($line in $lines) {
+            $parts=$line -split ' \*',2
+            if ((Get-FileHash (Join-Path $root $parts[1]) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $parts[0]) {throw 'Package checksum mismatch'}
+          }
+          if (!(Test-Path package/rdna4-swin-r63.exe) -or !(Test-Path package/RUN_R63.cmd)) {throw 'Missing executable or launcher'}
+          Write-Host 'Package checksums verified; target GPU and game NOT tested.'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r6.3-Swin-Scheduling
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
