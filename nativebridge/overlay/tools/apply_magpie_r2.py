@@ -114,6 +114,13 @@ def patch_renderer(s: str) -> str:
     return s
 
 def patch_core_project(s: str) -> str:
+    # NativeBridge source files include headers as "native_bridge/...".  The
+    # project historically only exposes Magpie.Core/include, so add the project
+    # directory itself as an explicit include root rather than relying on the
+    # compiler's source-file-relative lookup.
+    s = once(s,
+        '<AdditionalIncludeDirectories>include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+        '<AdditionalIncludeDirectories>.;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>')
     return once(s, '</Project>', '''  <ItemGroup>
     <ClInclude Include="NativeBridgeFrameSource.h" />
     <ClInclude Include="native_bridge\\ledger.hpp" />
@@ -121,6 +128,7 @@ def patch_core_project(s: str) -> str:
     <ClInclude Include="native_bridge\\windows\\ipc_pipe.hpp" />
     <ClInclude Include="native_bridge\\windows\\local_interop.hpp" />
     <ClInclude Include="native_bridge\\windows\\session_protocol.hpp" />
+    <ClInclude Include="native_bridge\\windows\\runtime_session.hpp" />
     <ClInclude Include="native_bridge\\windows\\transport_d3d12.hpp" />
     <ClCompile Include="NativeBridgeFrameSource.cpp" />
     <ClCompile Include="native_bridge\\ledger.cpp" />
@@ -128,6 +136,7 @@ def patch_core_project(s: str) -> str:
     <ClCompile Include="native_bridge\\windows\\ipc_pipe.cpp" />
     <ClCompile Include="native_bridge\\windows\\local_interop.cpp" />
     <ClCompile Include="native_bridge\\windows\\session_protocol.cpp" />
+    <ClCompile Include="native_bridge\\windows\\runtime_session.cpp" />
     <ClCompile Include="native_bridge\\windows\\transport_d3d12.cpp" />
   </ItemGroup>
 </Project>''')
@@ -171,9 +180,9 @@ def main() -> int:
         'src/Magpie.Core/native_bridge/ledger.cpp': cpp_with_pch((ROOT/'src/ledger.cpp').read_text()),
         'src/Magpie.Core/native_bridge/wire.cpp': cpp_with_pch((ROOT/'src/wire.cpp').read_text()),
     }
-    for name in ('ipc_pipe.hpp','local_interop.hpp','session_protocol.hpp','transport_d3d12.hpp'):
+    for name in ('ipc_pipe.hpp','local_interop.hpp','session_protocol.hpp','runtime_session.hpp','transport_d3d12.hpp'):
         additions[f'src/Magpie.Core/native_bridge/windows/{name}'] = (ROOT/'windows'/name).read_text()
-    for name in ('ipc_pipe.cpp','local_interop.cpp','session_protocol.cpp','transport_d3d12.cpp'):
+    for name in ('ipc_pipe.cpp','local_interop.cpp','session_protocol.cpp','runtime_session.cpp','transport_d3d12.cpp'):
         additions[f'src/Magpie.Core/native_bridge/windows/{name}'] = cpp_with_pch((ROOT/'windows'/name).read_text())
     for rel in additions:
         if (source/rel).exists():
@@ -187,6 +196,7 @@ def main() -> int:
         'mode': 'apply' if args.apply else 'check',
         'files_checked': len(before),
         'consumer_runtime_installed': True,
+        'consumer_runtime_session_compiled': True,
         'consumer_only': True,
         'game_hook_installed': False,
         'runtime_tested': False,
