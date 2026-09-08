@@ -28,7 +28,7 @@ int run(IDXGIAdapter1* adapter){
     constexpr uint64_t instance=0x4e425232ULL;
     constexpr uint64_t session=0x1111222233334444ULL;
     constexpr uint64_t generation=3;
-    constexpr uint64_t viewport=77;
+    constexpr uint64_t viewport=0; // Streamline viewport zero is valid in real games.
     const nb::Extent extent{1920,1080};
 
     nb::session::ProducerSession producer;
@@ -37,21 +37,23 @@ int run(IDXGIAdapter1* adapter){
     pc.extent=extent;pc.colorFormat=nb::Format::Rgba8;pc.requireDifferentAdapters=false;
     const HRESULT listen=producer.Listen(producerDevice.Get(),pc);
     if(listen==DXGI_ERROR_UNSUPPORTED || listen==E_NOTIMPL)return 77;
-    check(SUCCEEDED(listen),"producer listen");
+    check(SUCCEEDED(listen),"producer listen with viewport zero");
     check(producer.Accept(20)==HRESULT_FROM_WIN32(ERROR_TIMEOUT),"accept timeout");
 
     HRESULT acceptHr=E_PENDING;
     std::thread acceptThread([&]{acceptHr=producer.Accept(5000);});
     nb::session::ConsumerSession consumer;
     nb::session::ConsumerConfig cc{};
-    cc.instance=instance;cc.viewport=viewport;cc.colorFormat=nb::Format::Rgba8;cc.requireDifferentAdapters=false;
+    cc.instance=instance; // viewport intentionally left at AnyViewport discovery default.
+    cc.colorFormat=nb::Format::Rgba8;cc.requireDifferentAdapters=false;
     const HRESULT connect=consumer.Connect(GetCurrentProcessId(),consumerDevice.Get(),cc,5000);
     acceptThread.join();
-    check(SUCCEEDED(connect),"consumer connect after producer timeout");
-    check(SUCCEEDED(acceptHr),"producer accept after timeout");
+    check(SUCCEEDED(connect),"consumer wildcard connect after producer timeout");
+    check(SUCCEEDED(acceptHr),"producer accept wildcard after timeout");
     check(producer.Connected()&&consumer.Connected(),"connected state");
     check(producer.PeerPid()==GetCurrentProcessId()&&consumer.PeerPid()==GetCurrentProcessId(),"authenticated peer pid");
     check(producer.GetPolicy().session==session&&consumer.GetPolicy().generation==generation,"session policy");
+    check(producer.GetPolicy().viewport==viewport&&consumer.GetPolicy().viewport==viewport,"viewport zero discovery");
     check(producer.GetPolicy().renderAdapter==consumer.GetPolicy().renderAdapter,"render adapter policy");
     check(producer.GetPolicy().processingAdapter==consumer.GetPolicy().processingAdapter,"processing adapter policy");
 
@@ -83,7 +85,7 @@ int run(IDXGIAdapter1* adapter){
     check(SUCCEEDED(producer.SendStop(5000)),"producer send stop");
     check(SUCCEEDED(consumer.ReceiveStop(5000)),"consumer receive stop");
     consumer.Close();producer.Close();
-    std::cout<<"PASS runtime session: accept/receive timeout recovery, auth, handles, frame/camera/release/stop\n";
+    std::cout<<"PASS runtime session: viewport0 wildcard discovery, timeout recovery, auth, handles, frame/camera/release/stop\n";
     return 0;
 }
 }
