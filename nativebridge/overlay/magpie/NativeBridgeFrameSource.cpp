@@ -83,8 +83,9 @@ bool NativeBridgeFrameSource::_Handshake() noexcept {
 
     nb::session::Hello request{};
     request.role = nb::session::Role::ConsumerRequest;
+    request.viewport = nb::session::AnyViewport;
     request.processingAdapter = _processingAdapter;
-    request.colorFormat = nb::Format::Rgba8;
+    request.colorFormat = nb::Format::Unknown;
     nb::ipc::Message message{};
     if (nb::session::MakeHelloMessage(request, message) != nb::session::Result::Ok ||
         FAILED(hr = _channel.Send(message, kControlTimeoutMs))) {
@@ -103,7 +104,8 @@ bool NativeBridgeFrameSource::_Handshake() noexcept {
         accepted.role != nb::session::Role::ProducerAccept ||
         accepted.processingAdapter != _processingAdapter ||
         accepted.renderAdapter == _processingAdapter ||
-        !nb::valid_extent(accepted.extent)) {
+        !nb::valid_extent(accepted.extent) ||
+        !nb::valid_color_format(accepted.colorFormat)) {
         _captureErrorContext = "NativeBridge hello validation";
         _captureErrorCode = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         return false;
@@ -434,8 +436,6 @@ FrameSourceState NativeBridgeFrameSource::_Update() noexcept {
         d3dDC->CopyResource(_depth.get(), _local.Textures11()[1].Get());
         d3dDC->CopyResource(_motion.get(), _local.Textures11()[2].Get());
         hr = d3dDC->Signal(_local.ConsumedFence11(), frame.token.serial);
-        // D3D12 may already have queued the next WaitConsumed. Submit the
-        // reverse fence promptly so neither API can deadlock on batching.
         d3dDC->Flush();
     }
     if (FAILED(hr)) {
@@ -470,8 +470,6 @@ bool NativeBridgeFrameSource::GetNativeGuidance(
         resource.metadata.frameId = frameId;
         resource.metadata.sourceExtent = extent;
         resource.metadata.validRegion = region;
-        // Published textures are copied on Renderer's immediate D3D11 context,
-        // so no external producer fence is required by FrameGuidanceService.
         resource.metadata.sync = {};
         resource.metadata.resetReason = _currentReset ?
             FrameGuidanceResetReason::CaptureInterrupted : FrameGuidanceResetReason::None;
