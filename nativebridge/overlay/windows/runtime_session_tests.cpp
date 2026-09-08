@@ -34,18 +34,18 @@ int run(IDXGIAdapter1* adapter){
     nb::session::ProducerSession producer;
     nb::session::ProducerConfig pc{};
     pc.instance=instance;pc.session=session;pc.generation=generation;pc.viewport=viewport;
-    pc.extent=extent;pc.colorFormat=nb::Format::Rgba8;pc.requireDifferentAdapters=false;
+    pc.extent=extent;pc.colorFormat=nb::Format::Rgba16F;pc.requireDifferentAdapters=false;
     const HRESULT listen=producer.Listen(producerDevice.Get(),pc);
     if(listen==DXGI_ERROR_UNSUPPORTED || listen==E_NOTIMPL)return 77;
-    check(SUCCEEDED(listen),"producer listen with viewport zero");
+    check(SUCCEEDED(listen),"producer listen with viewport zero and FP16");
     check(producer.Accept(20)==HRESULT_FROM_WIN32(ERROR_TIMEOUT),"accept timeout");
 
     HRESULT acceptHr=E_PENDING;
     std::thread acceptThread([&]{acceptHr=producer.Accept(5000);});
     nb::session::ConsumerSession consumer;
     nb::session::ConsumerConfig cc{};
-    cc.instance=instance; // viewport intentionally left at AnyViewport discovery default.
-    cc.colorFormat=nb::Format::Rgba8;cc.requireDifferentAdapters=false;
+    cc.instance=instance; // viewport=AnyViewport and color=Unknown discovery defaults.
+    cc.requireDifferentAdapters=false;
     const HRESULT connect=consumer.Connect(GetCurrentProcessId(),consumerDevice.Get(),cc,5000);
     acceptThread.join();
     check(SUCCEEDED(connect),"consumer wildcard connect after producer timeout");
@@ -54,6 +54,7 @@ int run(IDXGIAdapter1* adapter){
     check(producer.PeerPid()==GetCurrentProcessId()&&consumer.PeerPid()==GetCurrentProcessId(),"authenticated peer pid");
     check(producer.GetPolicy().session==session&&consumer.GetPolicy().generation==generation,"session policy");
     check(producer.GetPolicy().viewport==viewport&&consumer.GetPolicy().viewport==viewport,"viewport zero discovery");
+    check(consumer.Endpoint().GetLayout().planes[0].format==nb::Format::Rgba16F,"FP16 color discovery");
     check(producer.GetPolicy().renderAdapter==consumer.GetPolicy().renderAdapter,"render adapter policy");
     check(producer.GetPolicy().processingAdapter==consumer.GetPolicy().processingAdapter,"processing adapter policy");
 
@@ -68,14 +69,16 @@ int run(IDXGIAdapter1* adapter){
     packet.processingAdapter=producer.GetPolicy().processingAdapter;
     packet.color.key=packet.depth.key=packet.motion.key=packet.camera.key=packet.key;
     packet.color.extent=packet.depth.extent=packet.motion.extent=extent;
+    packet.color.format=nb::Format::Rgba16F;
     const nb::Rect full{0,0,extent.width,extent.height};
     packet.color.validRect=packet.depth.validRect=packet.motion.validRect=full;
     const nb::Token token{1,42};
-    check(SUCCEEDED(producer.SendFrame(token,packet,packet.timestampNs,5000)),"producer send frame");
+    check(SUCCEEDED(producer.SendFrame(token,packet,packet.timestampNs,5000)),"producer send FP16 frame");
 
     nb::Token received{};nb::Packet packet2{};
-    check(SUCCEEDED(consumer.ReceiveFrame(received,packet2,packet.timestampNs,5000)),"consumer receive frame");
+    check(SUCCEEDED(consumer.ReceiveFrame(received,packet2,packet.timestampNs,5000)),"consumer receive FP16 frame");
     check(received==token&&packet2.key==packet.key,"frame identity");
+    check(packet2.color.format==nb::Format::Rgba16F,"frame preserves FP16 format");
     check(std::memcmp(&packet2.camera.viewToClip,&packet.camera.viewToClip,sizeof(nb::Matrix))==0,
         "camera matrices survive runtime session");
 
@@ -85,7 +88,7 @@ int run(IDXGIAdapter1* adapter){
     check(SUCCEEDED(producer.SendStop(5000)),"producer send stop");
     check(SUCCEEDED(consumer.ReceiveStop(5000)),"consumer receive stop");
     consumer.Close();producer.Close();
-    std::cout<<"PASS runtime session: viewport0 wildcard discovery, timeout recovery, auth, handles, frame/camera/release/stop\n";
+    std::cout<<"PASS runtime session: viewport0+FP16 discovery, timeout recovery, auth, handles, frame/camera/release/stop\n";
     return 0;
 }
 }
