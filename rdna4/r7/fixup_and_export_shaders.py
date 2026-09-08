@@ -10,6 +10,11 @@ def once(old,new,label):
     if n!=1: raise RuntimeError(f'{label}: expected one target, got {n}')
     s=s.replace(old,new)
 once('#include <algorithm>\n','#include <algorithm>\n#include <cmath>\n','cmath include')
+# Windows headers may define function-like min/max macros. Parenthesized std functions are macro-proof.
+once('std::min(w, std::max(64u, static_cast<UINT>(w * workingScale + 0.5f)))',
+     '(std::min)(w, (std::max)(64u, static_cast<UINT>(w * workingScale + 0.5f)))','work width minmax')
+once('std::min(h, std::max(64u, static_cast<UINT>(h * workingScale + 0.5f)))',
+     '(std::min)(h, (std::max)(64u, static_cast<UINT>(h * workingScale + 0.5f)))','work height minmax')
 # Shader model 5 has no portable uint64_t requirement here; 8K-class products are safely 32-bit.
 once('uint2 q=min(uint2((uint64_t(p.x)*srcW+dstW/2)/dstW,(uint64_t(p.y)*srcH+dstH/2)/dstH),uint2(srcW-1,srcH-1));',
      'uint2 q=min(uint2((p.x*srcW+dstW/2)/dstW,(p.y*srcH+dstH/2)/dstH),uint2(srcW-1,srcH-1));','SM5 depth coordinate')
@@ -32,6 +37,7 @@ for name in ('ScaleColourShader','ScaleMotionShader','ScaleDepthShader','Composi
     path=out/(name+'.hlsl');path.write_text(code,encoding='utf-8',newline='\n')
     exports[name]={'sha256':hashlib.sha256(code.encode()).hexdigest(),'bytes':len(code.encode())}
 report={'backend_sha256':hashlib.sha256(cpp.read_bytes()).hexdigest(),'shaders':exports,
-        'sm5_uint64_dependency_removed':True,'full_colour_state_restored':True,'gpu_executed':False}
+        'windows_minmax_macro_avoided':True,'sm5_uint64_dependency_removed':True,
+        'full_colour_state_restored':True,'gpu_executed':False}
 (root/'r7-fixup-report.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
 print(json.dumps(report,indent=2))
