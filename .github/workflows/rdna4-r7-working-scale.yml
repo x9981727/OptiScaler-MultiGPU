@@ -1,4 +1,4 @@
-name: RDNA4 r7 WorkingScale performance build
+name: RDNA4 r7 AMD WorkingScale performance build
 on:
   push:
     branches: [dlssnr-rdna4-r7-working-scale]
@@ -11,7 +11,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Checkout experiment branch
         uses: actions/checkout@v4
@@ -32,26 +32,53 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pinned upstream checkout failed' }
           $actual=(& git -C $up rev-parse HEAD).Trim()
           if ($actual -ne 'e58ff27a3d5ac86184875e01b317ff1463a247c1') { throw "Wrong upstream commit: $actual" }
-      - name: Verify pinned source and WorkingScale contract
+      - name: Verify why upstream AMD needs an explicit r7 patch
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $up='D:/u'
           $actual=(& git -C $up rev-parse HEAD).Trim()
-          $dx=Join-Path $up 'OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
-          $cfg=Join-Path $up 'OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/Config.cpp'
-          if (!(Select-String -LiteralPath $dx -Pattern 'DlssNrWorkingScale' -Quiet)) { throw 'DX12 WorkingScale implementation missing' }
-          if (!(Select-String -LiteralPath $dx -Pattern '0\.25f' -Quiet) -or !(Select-String -LiteralPath $dx -Pattern '2\.0f' -Quiet)) { throw 'Expected WorkingScale clamp missing' }
-          if (!(Select-String -LiteralPath $cfg -Pattern 'WorkingScale' -Quiet)) { throw 'WorkingScale config binding missing' }
+          $amd=Join-Path $up 'OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/dlssnr/amd/AmdBridge.cpp'
+          $cfg=Join-Path $up 'OptiScaler-DLSSNR-PreSR-Multipass-main/OptiScaler/Config.h'
+          $readme=Join-Path $up 'analysis/LEIA-ME-AMD.md'
+          if (!(Select-String -LiteralPath $cfg -Pattern 'DlssNrWorkingScale' -Quiet)) { throw 'WorkingScale configuration missing upstream' }
+          if (Select-String -LiteralPath $amd -Pattern 'DlssNrWorkingScale' -Quiet) { throw 'Pinned AMD backend unexpectedly already consumes WorkingScale; re-audit instead of double-patching' }
+          if (!(Select-String -LiteralPath $readme -Pattern 'WorkingScale.*não são controles do backend AMD' -Quiet)) { throw 'Pinned AMD scope statement changed' }
           @{
             upstream_commit=$actual
-            working_scale_source_verified=$true
+            upstream_generic_working_scale_exists=$true
+            upstream_amd_working_scale_wired=$false
+            r7_patch_required=$true
             target='RX 9070 XT / gfx1201'
-            purpose='Reduce neural working raster and test end-to-end game performance; not a Swin ISA replacement'
             target_gpu_executed_in_ci=$false
-            game_tested_in_ci=$false
           } | ConvertTo-Json | Set-Content r7-source-gate.json -Encoding utf8
-      - name: Build current upstream OptiScaler x64 Release
+      - name: Apply AMD-native reduced neural raster patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root='D:/u/OptiScaler-DLSSNR-PreSR-Multipass-main'
+          python rdna4/r7/patch_amd_working_scale.py $root
+          if ($LASTEXITCODE -ne 0) { throw 'AMD WorkingScale patch failed' }
+          python rdna4/r7/fixup_and_export_shaders.py $root
+          if ($LASTEXITCODE -ne 0) { throw 'AMD WorkingScale fixup failed' }
+          Copy-Item (Join-Path $root 'r7-patch-report.json') .
+          Copy-Item (Join-Path $root 'r7-fixup-report.json') .
+      - name: Compile all new embedded HLSL as shader model 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $shaderDir='D:/u/OptiScaler-DLSSNR-PreSR-Multipass-main/r7-shaders'
+          $fxc=Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin' -Recurse -Filter fxc.exe | Where-Object { $_.FullName -match 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$fxc) { throw 'fxc.exe not found' }
+          New-Item -ItemType Directory -Force -Path r7-shader-bin | Out-Null
+          foreach($shader in Get-ChildItem $shaderDir -Filter '*.hlsl') {
+            $out=Join-Path 'r7-shader-bin' ($shader.BaseName+'.cso')
+            & $fxc.FullName /nologo /T cs_5_0 /E main /O3 /Fo $out $shader.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Shader compile failed: $($shader.Name)" }
+          }
+          if ((Get-ChildItem r7-shader-bin -Filter '*.cso').Count -ne 4) { throw 'Expected four compiled r7 shaders' }
+          Get-ChildItem r7-shader-bin | Select-Object Name,Length
+      - name: Build patched OptiScaler x64 Release
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -63,40 +90,64 @@ jobs:
           if (!(Test-Path $msbuild)) { throw "MSBuild missing: $msbuild" }
           $kits='C:/Program Files (x86)/Windows Kits/10/Include'
           $sdk=Get-ChildItem $kits -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'um/windows.h') } | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
-          if (!$sdk) { throw 'Windows 10/11 SDK missing' }
+          if (!$sdk) { throw 'Windows SDK missing' }
           $sdkVersion=$sdk.Name
           Set-Content -LiteralPath (Join-Path $root 'OptiScaler/resource_build_date.h') -Value ('#define VER_BUILD_DATE "'+(Get-Date -Format 'yyyyMMdd_HHmmss')+'"') -Encoding ascii
-          Set-Content -LiteralPath (Join-Path $root 'OptiScaler/resource_build_commit.h') -Value '#define VER_BUILD_COMMIT "rdna4-r7-working-scale-e58ff27"' -Encoding ascii
+          Set-Content -LiteralPath (Join-Path $root 'OptiScaler/resource_build_commit.h') -Value '#define VER_BUILD_COMMIT "rdna4-r7-amd-working-scale-e58ff27"' -Encoding ascii
           $log=(Resolve-Path '.').Path+'\r7-msbuild.log'
           & $msbuild (Join-Path $root 'OptiScaler.sln') /m:4 /t:Build /p:Configuration=Release /p:Platform=x64 "/p:WindowsTargetPlatformVersion=$sdkVersion" /p:PreBuildEventUseInBuild=false /p:PostBuildEventUseInBuild=false /v:minimal /fl "/flp:logfile=$log;verbosity=normal"
-          if ($LASTEXITCODE -ne 0) { Get-Content $log -Tail 300; throw 'Pinned upstream build failed' }
+          if ($LASTEXITCODE -ne 0) { Get-Content $log -Tail 350; throw 'Patched upstream build failed' }
           $release=Join-Path $root 'x64/Release/a'
-          if (!(Test-Path (Join-Path $release 'OptiScaler.dll'))) { Get-ChildItem $root -Recurse -Filter OptiScaler.dll | Select-Object FullName,Length; throw 'OptiScaler.dll build output missing' }
-          if (!(Test-Path (Join-Path $release 'nvngx.dll_dlssnr.dll'))) { Get-ChildItem $root -Recurse -Filter 'nvngx.dll_dlssnr.dll' | Select-Object FullName,Length; throw 'DLSSNR forwarder build output missing' }
+          foreach($name in @('OptiScaler.dll','nvngx.dll_dlssnr.dll')) { if (!(Test-Path (Join-Path $release $name))) { throw "Build output missing: $name" } }
           Get-ChildItem $release -File | Select-Object Name,Length | Format-Table -AutoSize
-      - name: Assemble r7 overlay and deterministic WorkingScale presets
+      - name: Static scale-one and AMD wiring gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root='D:/u/OptiScaler-DLSSNR-PreSR-Multipass-main'
+          $backend=Get-Content (Join-Path $root 'OptiScaler/dlssnr/amd/AmdPreSr.cpp') -Raw
+          $bridge=Get-Content (Join-Path $root 'OptiScaler/dlssnr/amd/AmdBridge.cpp') -Raw
+          foreach($needle in @('s.workingScale = std::clamp','workProcessed','workBase','float(workW) / float(w)','if (scaled && accepted')) {
+            if (($backend+$bridge).IndexOf($needle) -lt 0) { throw "Missing r7 contract: $needle" }
+          }
+          if ($backend.IndexOf('scaled ? p->workColour.Get() : p->colour.Get()') -lt 0) { throw 'Scale=1 legacy resource branch missing' }
+          @{
+            amd_working_scale_wired=$true
+            scale1_uses_legacy_full_resolution_runtime_resource=$true
+            scale_lt_1_uses_reduced_colour_motion_depth=$true
+            full_resolution_base_preserved_by_residual_composite=$true
+            motion_scale_adjusted_for_work_extent=$true
+            target_gpu_executed=$false
+            game_tested=$false
+          } | ConvertTo-Json | Set-Content r7-static-gate.json -Encoding utf8
+      - name: Assemble ready-to-test AMD overlay and presets
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $src='D:/u/OptiScaler-DLSSNR-PreSR-Multipass-main'
           $release=Join-Path $src 'x64/Release/a'
           $static='D:/u/package-amd-presr'
-          New-Item -ItemType Directory -Force -Path package,package/presets,package/reports | Out-Null
+          New-Item -ItemType Directory -Force -Path package,package/presets,package/reports,package/source | Out-Null
           Copy-Item (Join-Path $release 'OptiScaler.dll') package/
           Copy-Item (Join-Path $release 'nvngx.dll_dlssnr.dll') package/
-          Get-ChildItem $static -File -Filter '*.dll' | ForEach-Object { Copy-Item $_.FullName package/ -Force }
+          foreach($name in @('dlssnr_amd_pass1.dll','dlssnr_amd_pass2.dll','dlssnr_amd_pass3.dll')) {
+            Copy-Item (Join-Path $static $name) package/$name
+          }
+          Copy-Item (Join-Path $static 'dlssnr_on_amd.ini') package/ -ErrorAction SilentlyContinue
           Copy-Item (Join-Path $src 'OptiScaler.ini') package/OptiScaler.ini
-          Copy-Item r7-source-gate.json package/reports/
-          Copy-Item r7-msbuild.log package/reports/
+          Copy-Item r7-source-gate.json,r7-patch-report.json,r7-fixup-report.json,r7-static-gate.json,r7-msbuild.log package/reports/
+          Copy-Item r7-shader-bin package/reports/ -Recurse
+          Copy-Item rdna4/r7/*.py package/source/
+          Copy-Item (Join-Path $src 'OptiScaler/dlssnr/amd/AmdPreSr.cpp') package/source/AmdPreSr.r7.cpp
+          Copy-Item (Join-Path $src 'OptiScaler/dlssnr/amd/AmdPreSr.h') package/source/AmdPreSr.r7.h
+          Copy-Item (Join-Path $src 'OptiScaler/dlssnr/amd/AmdBridge.cpp') package/source/AmdBridge.r7.cpp
           function New-ScalePreset([string]$name,[string]$value) {
-            $lines=Get-Content (Join-Path $src 'OptiScaler.ini')
-            $inside=$false;$changed=0
+            $lines=Get-Content (Join-Path $src 'OptiScaler.ini');$inside=$false;$changed=0
             for($i=0;$i -lt $lines.Count;$i++) {
-              $line=$lines[$i]
-              if($line -match '^\s*\[(.+)\]\s*$') { $inside=($Matches[1] -eq 'DlssNr') }
-              elseif($inside -and $line -match '^\s*WorkingScale\s*=') { $lines[$i]="WorkingScale=$value";$changed++ }
+              if($lines[$i] -match '^\s*\[(.+)\]\s*$') { $inside=($Matches[1] -eq 'DlssNr') }
+              elseif($inside -and $lines[$i] -match '^\s*WorkingScale\s*=') { $lines[$i]="WorkingScale=$value";$changed++ }
             }
-            if($changed -ne 1) { throw "Expected exactly one [DlssNr] WorkingScale entry, got $changed" }
+            if($changed -ne 1) { throw "Expected one [DlssNr] WorkingScale entry, got $changed" }
             $lines | Set-Content "package/presets/$name.ini" -Encoding utf8
           }
           New-ScalePreset 'WorkingScale_100_REFERENCE' '1.0'
@@ -106,46 +157,48 @@ jobs:
           New-ScalePreset 'WorkingScale_050_ULTRA' '0.50'
           New-ScalePreset 'WorkingScale_025_DIAGNOSTIC_ONLY' '0.25'
           @'
-          @echo off
-          setlocal
-          cd /d "%~dp0"
-          echo Choose preset by copying one file from presets over OptiScaler.ini.
-          echo 100 = reference, 085/075/067/050 = progressively lower neural working resolution.
-          echo 025 is diagnostic only and likely sacrifices visible NR detail.
-          echo This script does not change the game automatically.
-          pause
-          '@ | Set-Content package/CHOOSE_PRESET.cmd -Encoding ascii
-          @'
-          RDNA4 r7 WorkingScale Test
-          ==========================
-          This is a manually tested performance/quality branch, NOT a final game DLL.
+          RDNA4 r7 AMD-native WorkingScale Test
+          ====================================
+          This is a manual RX 9070 XT performance/quality experiment, NOT a final release.
 
-          Why this path:
-          - RX 9070 XT profiling shows Swin dominates the recovered Forward while Head is tiny.
-          - Under the output-sensitive 1/32 control test, the isolated faster Head replacements made the complete Forward slower, so r7 drops Head replacement from the performance path.
-          - The pinned upstream source implements DlssNr.WorkingScale. It changes the neural working raster and resamples its contribution instead of changing the full-resolution base-colour raster.
+          What changed:
+          - Upstream already had WorkingScale for the generic NGX path, but explicitly did not wire it to the AMD pre-SR backend.
+          - r7 wires [DlssNr] WorkingScale into AMD pre-SR.
+          - Scale 1.00 follows the legacy full-resolution AMD path.
+          - Below 1.00 the full-resolution base colour is preserved. Colour/motion/depth guides are reduced for the private HIP NR runtime; after all NR passes, only (processedSmall-baseSmall) is enlarged and added to the untouched full-res base.
+          - Motion values are sampled unchanged while the packet MV scale is multiplied by workWidth/baseWidth and workHeight/baseHeight.
+          - History is invalidated whenever the work extent/scale changes.
 
-          Install over an existing working DLSSNR-on-AMD test setup:
-          1. Back up current OptiScaler.dll, nvngx.dll_dlssnr.dll and OptiScaler.ini.
-          2. Keep the existing dlssnr_on_amd_weights.bin. It is intentionally NOT duplicated here.
-          3. Copy this package's DLLs into the existing test installation.
-          4. Start by copying presets/WorkingScale_100_REFERENCE.ini over OptiScaler.ini and confirm reference operation.
-          5. Then test 0.85, 0.75, 0.67 and 0.50 in the same scene/settings. 0.25 is diagnostic only.
-          6. Compare GPU frame time and visible reconstruction/denoising detail, temporal stability, disocclusion behaviour and ghosting.
+          Why:
+          The user's output-sensitive 1/32 full-plan test measured original=23.5254 ms holdout, while the faster isolated Head replacements measured 24.1134 and 24.0517 ms end-to-end. Head is therefore dropped from the r7 performance path. Prior profiling instead places about 19 ms in Swin families.
+
+          Install/test:
+          1. CLOSE the game. Back up the current working OptiScaler proxy/DLL, OptiScaler.ini and the three dlssnr_amd_pass*.dll files.
+          2. Keep your existing dlssnr_on_amd_weights.bin in place. This ZIP intentionally does NOT duplicate the ~148 MB weights.
+          3. Copy the three pass DLLs from this ZIP and the built OptiScaler.dll/nvngx.dll_dlssnr.dll into your existing test setup as appropriate for that setup. If your loaded proxy is a renamed OptiScaler.dll (for example dxgi.dll/WINMM.dll), replace that proxy with this built OptiScaler.dll under the SAME proxy filename instead of leaving two proxies.
+          4. Start with presets/WorkingScale_100_REFERENCE.ini copied over OptiScaler.ini. Confirm AMD pre-SR still works.
+          5. Test 0.85, 0.75, 0.67, then 0.50 in the SAME scene, same render resolution, same FSR/DLSS settings, same pass count, and same FPS-cap state. 0.25 is diagnostic only.
+          6. After each scale, inspect amd_presr.log. It must say base=... work=... with the work dimensions shrinking. If work stays equal to base, do not interpret FPS results.
+          7. Compare GPU frame time/FPS AND visual NR detail, temporal stability, disocclusion edges and ghosting. A faster result with unacceptable NR quality is not the final choice.
 
           Neural pixel area relative to 1.00:
-          1.00 = 100%; 0.85 = 72.25%; 0.75 = 56.25%; 0.67 = 44.89%; 0.50 = 25%; 0.25 = 6.25%.
-          These are geometric pixel counts, NOT promised speedups; resampling, fixed work and memory traffic remain.
+          1.00=100%; 0.85=72.25%; 0.75=56.25%; 0.67=44.89%; 0.50=25%; 0.25=6.25%.
+          These are pixel counts, NOT promised speedups.
 
-          Do not delete dlssnr_on_amd_weights.bin. WorkingScale deliberately changes the neural work resolution, so different scales are not byte-identical model tests.
-          Pinned upstream commit: e58ff27a3d5ac86184875e01b317ff1463a247c1.
-          This package does not claim NVIDIA-equivalent performance or final game-quality validation.
+          Important:
+          - Do not delete dlssnr_on_amd_weights.bin.
+          - Do not use this in anti-cheat-protected multiplayer games.
+          - Scale<1 intentionally changes neural working resolution, so byte-identical output to scale1 is neither expected nor required.
+          - CI compiled the C++ and all four new HLSL shaders, but CI has no RX 9070 XT and did not execute the private HIP runtime.
+          - If scale1 is not functionally equivalent to your current working setup, restore backup and send OptiScaler.log + amd_presr.log; do not continue to lower scales.
+          - Pinned upstream: e58ff27a3d5ac86184875e01b317ff1463a247c1.
           '@ | Set-Content package/README_R7.txt -Encoding utf8
           @{
-            revision='r7-working-scale'
+            revision='r7-amd-native-working-scale'
             upstream_commit='e58ff27a3d5ac86184875e01b317ff1463a247c1'
-            upstream_source_built=$true
             windows_x64_release_built=$true
+            embedded_hlsl_compiled_in_ci=$true
+            amd_backend_working_scale_wired=$true
             working_scale_presets=@(1.0,0.85,0.75,0.67,0.50,0.25)
             weights_included=$false
             reuse_existing_weights=$true
@@ -159,11 +212,16 @@ jobs:
             $rel=$_.FullName.Substring($root.Length+1).Replace('\','/')
             '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$rel
           } | Set-Content package/SHA256SUMS.txt -Encoding ascii
+          foreach($entry in Get-Content package/SHA256SUMS.txt) {
+            $expected=$entry.Substring(0,64);$rel=$entry.Substring(66)
+            $actual=(Get-FileHash (Join-Path package $rel) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($actual -ne $expected){throw "Package hash mismatch: $rel"}
+          }
           Get-ChildItem package -Recurse -File | Select-Object FullName,Length
-      - name: Upload ready-to-test r7 overlay ZIP
+      - name: Upload ready-to-test r7 AMD overlay ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: RDNA4-r7-WorkingScale-Test
+          name: RDNA4-r7-AMD-WorkingScale-Test
           path: package/
           if-no-files-found: error
           compression-level: 9
