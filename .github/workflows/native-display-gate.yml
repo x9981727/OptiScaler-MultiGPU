@@ -1,0 +1,55 @@
+name: Build isolated native display pacing probe
+on:
+  push:
+    branches: [test/xefg-native-display-gate]
+    paths: [.github/workflows/native-display-gate.yml, 'lab-native/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: intel/xess
+          ref: 207b703ad215da5b86dde04819a16277a96980aa
+          path: intel-reference
+      - name: Reconstruct protected ring sample and add native queue experiment
+        shell: pwsh
+        run: |
+          python lab-ring/apply_reference_ring.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Ring source anchors failed' }
+          python lab-native/apply_native_gate.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Native source anchors failed' }
+      - name: Compile Windows reference executable
+        shell: pwsh
+        run: |
+          cmake -S intel-reference/samples/basic_sample_frame_generation -B probe-build -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Configuration failed' }
+          cmake --build probe-build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+      - name: Retain provenance and unchanged SDK licenses
+        shell: pwsh
+        run: |
+          $out='probe-build/bin/Release'
+          Copy-Item intel-reference/LICENSE.txt "$out/INTEL-SDK-LICENSE.txt"
+          Copy-Item intel-reference/third-party-programs.txt "$out/third-party-programs.txt"
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/NATIVE-GATE-MANIFEST.json "$out/NATIVE-GATE-MANIFEST.json"
+          New-Item probe-build/source-review -ItemType Directory -Force | Out-Null
+          Copy-Item lab-native/* probe-build/source-review/
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp probe-build/source-review/
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h probe-build/source-review/
+          'This is an isolated SDK native output queue observer and deadline experiment. No OptiScaler game DLL is built or installed. Native gate and sleep bypass default OFF. No FPS, pixel, stability or game acceptance claimed by CI.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content probe-build/SHA256.txt -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XeFG-native-display-probe
+          path: |
+            probe-build/bin/Release/
+            probe-build/source-review/
+            probe-build/SHA256.txt
+          retention-days: 7
+          if-no-files-found: error
