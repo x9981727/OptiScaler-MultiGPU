@@ -1,0 +1,152 @@
+--- a/src/Magpie.Core/PresenterBase.h
++++ b/src/Magpie.Core/PresenterBase.h
+@@ -39,6 +39,17 @@
+ 		const RECT&
+ 	) noexcept {}
+ 
++	// Native guidance keeps game depth, motion and camera in one same-frame transaction.
++	// Presenters that do not explicitly consume it intentionally ignore this call.
++	virtual void SetNativeFrameGuidance(
++		ID3D11Texture2D*,
++		ID3D11Texture2D*,
++		const nb::Camera&,
++		FrameGuidanceFrameId,
++		bool,
++		const RECT&
++	) noexcept {}
++
+ 	// Frame-generation presenters may expose a transparent composition surface
+ 	// above their SDK-owned colour swap chain. UI-only presents use this surface
+ 	// and therefore never masquerade as a new game input frame.
+--- a/src/Magpie.Core/XeSSFGPresenter.h
++++ b/src/Magpie.Core/XeSSFGPresenter.h
+@@ -11,7 +11,8 @@
+ 
+ // XeSS-FG is exposed as an effect, but Intel's API generates frames inside a
+ // D3D12 proxy swap chain. This presenter bridges Magpie's D3D11 frontend into
+-// that swap chain while providing flat depth and optional optical-flow motion.
++// that swap chain. NativeBridge can additionally provide same-frame game depth,
++// motion and camera constants; legacy mode retains flat depth/optical-flow fallback.
+ class XeSSFGPresenter final : public PresenterBase {
+ public:
+ 	struct Impl;
+@@ -19,7 +20,8 @@
+ 	explicit XeSSFGPresenter(
+ 		XeSSFGVariant variant = XeSSFGVariant::X2,
+ 		uint32_t requestedMultiplier = 2,
+-		bool useExternalMotion = false
++		bool useExternalMotion = false,
++		bool useNativeGuidance = false
+ 	);
+ 	~XeSSFGPresenter() noexcept override;
+ 
+@@ -38,6 +40,14 @@
+ 		bool requiresHistoryReset,
+ 		const RECT& destinationRect
+ 	) noexcept override;
++	void SetNativeFrameGuidance(
++		ID3D11Texture2D* motion,
++		ID3D11Texture2D* depth,
++		const nb::Camera& camera,
++		FrameGuidanceFrameId frameId,
++		bool requiresHistoryReset,
++		const RECT& destinationRect
++	) noexcept override;
+ 	bool HasIndependentOverlay() const noexcept override;
+ 	bool BeginOverlayFrame(
+ 		winrt::com_ptr<ID3D11Texture2D>& frameTex,
+@@ -66,6 +76,7 @@
+ 	[[maybe_unused]] XeSSFGVariant _variant = XeSSFGVariant::X2;
+ 	[[maybe_unused]] uint32_t _requestedMultiplier = 2;
+ 	[[maybe_unused]] bool _useExternalMotion = false;
++	[[maybe_unused]] bool _useNativeGuidance = false;
+ 	ScalingError _initializationError = ScalingError::ScalingFailedGeneral;
+ };
+ 
+--- a/src/Magpie.Core/XeSSFGPresenter.cpp
++++ b/src/Magpie.Core/XeSSFGPresenter.cpp
+@@ -7,6 +7,7 @@
+ #include "ScalingWindow.h"
+ #include "Win32Helper.h"
+ #include <dcomp.h>
++#include <cstring>
+ 
+ #ifdef MP_ENABLE_XESS_FRAME_GENERATION
+ #include <d3d12.h>
+@@ -79,6 +80,9 @@
+ 	winrt::com_ptr<ID3D11Texture2D> motion11;
+ 	winrt::com_ptr<ID3D11UnorderedAccessView> motionUav11;
+ 	winrt::com_ptr<ID3D12Resource> motion12;
++	winrt::com_ptr<ID3D11Texture2D> depth11;
++	winrt::com_ptr<ID3D11UnorderedAccessView> depthUav11;
++	winrt::com_ptr<ID3D12Resource> depth12;
+ 	winrt::com_ptr<ID3D12Resource> zeroMotion12;
+ 	winrt::com_ptr<ID3D12Resource> flatDepth12;
+ 	winrt::com_ptr<ID3D12DescriptorHeap> clearHeap12;
+@@ -95,6 +99,7 @@
+ 	winrt::com_ptr<IDCompositionVisual2> overlayDCompVisual;
+ 	winrt::com_ptr<IDCompositionVirtualSurface> overlayDCompSurface;
+ 	bool overlayDrawActive = false;
++	bool allowTearing = false;
+ 
+ 	xell_context_handle_t xell = nullptr;
+ 	xefg_swapchain_handle_t xefg = nullptr;
+@@ -110,6 +115,11 @@
+ 	bool externalMotionEnabled = false;
+ 	bool externalMotionValid = false;
+ 	bool externalMotionReset = true;
++	bool nativeGuidanceEnabled = false;
++	bool nativeGuidanceValid = false;
++	bool nativeGuidanceReset = true;
++	uint32_t initFlags = XEFG_SWAPCHAIN_INIT_FLAG_NONE;
++	nb::Camera nativeCamera{};
+ 	bool resetHistory = true;
+ 	std::chrono::steady_clock::time_point lastPresent{};
+ };
+@@ -237,6 +247,36 @@
+ 	return true;
+ }
+ 
++static bool CreateSharedDepth(XeSSFGPresenter::Impl& impl) noexcept {
++	if (!impl.nativeGuidanceEnabled) return true;
++	D3D11_TEXTURE2D_DESC desc{};
++	desc.Width = impl.width;
++	desc.Height = impl.height;
++	desc.MipLevels = 1;
++	desc.ArraySize = 1;
++	desc.Format = DXGI_FORMAT_R32_FLOAT;
++	desc.SampleDesc.Count = 1;
++	desc.Usage = D3D11_USAGE_DEFAULT;
++	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
++	desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
++	HRESULT hr = impl.device11->CreateTexture2D(&desc, nullptr, impl.depth11.put());
++	if (SUCCEEDED(hr)) hr = impl.device11->CreateUnorderedAccessView(
++		impl.depth11.get(), nullptr, impl.depthUav11.put());
++	winrt::com_ptr<IDXGIResource1> dxgiResource;
++	if (SUCCEEDED(hr)) hr = impl.depth11->QueryInterface(IID_PPV_ARGS(dxgiResource.put()));
++	HANDLE rawHandle = nullptr;
++	if (SUCCEEDED(hr)) hr = dxgiResource->CreateSharedHandle(
++		nullptr, GENERIC_ALL, nullptr, &rawHandle);
++	wil::unique_handle handle(rawHandle);
++	if (SUCCEEDED(hr)) hr = impl.device12->OpenSharedHandle(
++		handle.get(), IID_PPV_ARGS(impl.depth12.put()));
++	if (FAILED(hr)) {
++		Logger::Get().ComError("Create XeSSFG D3D11/D3D12 native depth interop failed", hr);
++		return false;
++	}
++	return true;
++}
++
+ static bool CreateFlatResource(
+ 	XeSSFGPresenter::Impl& impl,
+ 	DXGI_FORMAT format,
+@@ -284,7 +324,7 @@
+ }
+ 
+ static bool CreateSizeDependentResources(XeSSFGPresenter::Impl& impl) noexcept {
+-	if (!CreateSharedColor(impl) || !CreateSharedMotion(impl)) {
++	if (!CreateSharedColor(impl) || !CreateSharedMotion(impl) || !CreateSharedDepth(impl)) {
+ 		return false;
+ 	}
+ 
+@@ -355,11 +395,90 @@
