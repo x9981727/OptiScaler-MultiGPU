@@ -1,0 +1,92 @@
+name: Build v26 RC2 phase-only game candidate
+on:
+  push:
+    branches: [test/v26-rc2-phase-only]
+    paths: ['v26rc2/**', '.github/workflows/build-v26-rc2.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v26-rc2-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Reconstruct retained baseline with original PowerShell environment
+        shell: powershell
+        run: |
+          python -m pip install pyyaml
+          if ($LASTEXITCODE -ne 0) { throw 'YAML preparation failed' }
+          @'
+          from pathlib import Path
+          import subprocess,yaml
+          root=Path.cwd()
+          w=yaml.safe_load((root/'.github/workflows/build-multigpu-unsigned.yml').read_text())
+          for step in w['jobs']['build']['steps']:
+              if step.get('name')=='Build Release':break
+              if 'run' not in step:continue
+              print('BASELINE:',step.get('name'),flush=True)
+              subprocess.run(['powershell','-NoLogo','-NoProfile','-NonInteractive','-Command','$ErrorActionPreference="Stop";\n'+step['run']],check=True)
+          '@ | Set-Content prepare-v26-baseline.py -Encoding utf8
+          python prepare-v26-baseline.py
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline reconstruction failed' }
+      - name: Apply reviewed game integration then remove recurring rate clock
+        shell: pwsh
+        run: |
+          foreach ($script in @('scripts/apply-v24.py','scripts/apply-v25.py','v26/apply_game_pacing.py','v26/finalize_candidate.py','v26rc2/patch_rc2.py')) {
+            python $script
+            if ($LASTEXITCODE -ne 0) { throw "Reconstruction failed: $script" }
+          }
+      - name: Test deadline policy and native queue lifecycle
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          msbuild v26/lifecycle-test.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate header compilation failed' }
+          & ./v26/out/v26-lifecycle-test.exe | Tee-Object v26/lifecycle-results.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate lifecycle regression failed' }
+      - name: Compile actual OptiScaler Windows x64 DLL
+        shell: pwsh
+        run: |
+          msbuild upstream/OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Game DLL compilation failed' }
+      - name: Verify no rate-clock implementation and package real game DLL
+        shell: pwsh
+        run: |
+          $dll='upstream/x64/Release/a/OptiScaler.dll'
+          if (-not (Test-Path $dll)) { throw 'No actual game DLL produced' }
+          $text=[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path $dll)))
+          foreach ($marker in @('MultiGPU v26 RC2:','v26 RC2 output-pacing-attached','fixedRateClock=removed','MultiGPU v24 color:')) {
+            if (-not $text.Contains($marker)) { throw "Missing candidate marker: $marker" }
+          }
+          $header=Get-Content v26/GameOutputPacing-compiled.h -Raw
+          if($header.Contains('nextDeadline') -or $header.Contains('fixedPeriodMs')) { throw 'Recurring rate clock remained' }
+          New-Item candidate/CopyToGame,candidate/Source -ItemType Directory -Force | Out-Null
+          Copy-Item $dll candidate/CopyToGame/dxgi.dll
+          @'
+          [OutputPacing]
+          Enabled=1
+          PhaseOffsetMs=-2.2
+          PhaseParity=0
+          Trace=1
+          '@ | Set-Content candidate/CopyToGame/XeFGPacing.ini -Encoding ascii
+          Copy-Item v26/INTEGRATION-MANIFEST.json,v26/lifecycle-results.txt candidate/
+          Copy-Item v26/GameOutputPacing-compiled.h,v26/apply_game_pacing.py,v26/finalize_candidate.py,v26/lifecycle-test.cpp candidate/Source/
+          Copy-Item v26rc2/* candidate/Source/
+          Copy-Item upstream/OptiScaler/framegen/xefg/XeFG_Dx12.cpp candidate/Source/
+          git archive --format=zip --output=candidate/Source/complete-build-recipe.zip HEAD
+          Get-ChildItem upstream -File | Where-Object { $_.Name -match '^LICENSE|^COPYING' } | Copy-Item -Destination candidate/
+          $hash=(Get-FileHash candidate/CopyToGame/dxgi.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          @{candidate='v26 RC2 phase-only';repo_commit=$env:GITHUB_SHA;upstream_commit=(git -C upstream rev-parse HEAD);run_id=$env:GITHUB_RUN_ID;dll_sha256=$hash;game_integration=$true;source_period_override_ignored=$true;recurring_rate_clock=$false;actual_game_test_passed=$false;perfect_pacing_claim=$false;zero_fps_cost_claim=$false;automatic_display_feedback=$false;installed_on_user_computer=$false} | ConvertTo-Json | Set-Content candidate/BUILD-MANIFEST.json -Encoding utf8
+          "$hash  CopyToGame/dxgi.dll" | Set-Content candidate/SHA256.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OptiScaler-v26-RC2-phase-only-game-candidate
+          path: candidate/
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
