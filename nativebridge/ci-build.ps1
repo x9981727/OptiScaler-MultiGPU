@@ -112,3 +112,8 @@ if(Test-Path $opOut){
 }
 'PASS: NativeBridge 9/9 + Magpie real XeSSFG SDK compile/link + native Depth/Motion/Camera r3 + exact DLSSFG native constants r4 + patched OptiScaler producer build. Real AMD/NVIDIA dual-GPU game validation is separate.' |
  Set-Content (Join-Path $dist 'BUILD_STATUS.txt')
+
+& (Join-Path $root 'package-runtime.ps1') -DistRoot $dist -OptiScalerOutput $opOut 2>&1 |
+ Tee-Object (Join-Path $reports 'runtime-package.txt')
+if($LASTEXITCODE){throw 'NativeBridge runtime package generation failed'}
+if(!(Test-Path (Join-Path $dist 'Magpie-NativeBridge-Runtime-x64.zip'))){throw 'Runtime ZIP missing after packaging'}
