@@ -26,6 +26,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native source anchors failed' }
           python lab-native/add_diagnostics.py intel-reference
           if ($LASTEXITCODE -ne 0) { throw 'Diagnostic source anchors failed' }
+          python lab-native/agility_probe.py intel-reference
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated runtime preparation failed' }
       - name: Compile Windows reference executable
         shell: pwsh
         run: |
@@ -40,16 +42,19 @@ jobs:
           Copy-Item intel-reference/LICENSE.txt "$out/INTEL-SDK-LICENSE.txt"
           Copy-Item intel-reference/third-party-programs.txt "$out/third-party-programs.txt"
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NATIVE-GATE-MANIFEST.json "$out/NATIVE-GATE-MANIFEST.json"
+          New-Item "$out/D3D12-Lab" -ItemType Directory -Force | Out-Null
+          Copy-Item agility-lab/* "$out/D3D12-Lab/"
           New-Item probe-build/source-review -ItemType Directory -Force | Out-Null
           Copy-Item lab-native/* probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.cpp probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/basic_sample.h probe-build/source-review/
           Copy-Item intel-reference/samples/basic_sample_frame_generation/NativeGate.h probe-build/source-review/NativeGate-compiled.h
-          'Isolated native output queue diagnostic. No OptiScaler game DLL is built or installed. Gate, split queue and debug flags default OFF. No hardware FPS or image certification by CI.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
+          Copy-Item intel-reference/samples/basic_sample_frame_generation/AgilityLab.cpp probe-build/source-review/
+          'Isolated diagnostic: app-local Agility 1.619.5, NOT the unchanged game runtime. No game DLL is built or installed. Gate, split and debug flags default OFF. No hardware FPS or image certification by CI.' | Set-Content "$out/TEST-SCOPE.txt" -Encoding utf8
           Get-ChildItem $out -File -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path $out).Path.Length+1))" } | Set-Content probe-build/SHA256.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
-          name: XeFG-native-display-probe
+          name: XeFG-native-display-probe-agility
           path: |
             probe-build/bin/Release/
             probe-build/source-review/
