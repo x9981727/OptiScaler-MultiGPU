@@ -40,7 +40,7 @@ private:
     };
 
     bool _Handshake() noexcept;
-    bool _CreateConfidenceTexture() noexcept;
+    bool _CreatePublishedTextures() noexcept;
     void _ReceiveLoop(std::stop_token stop) noexcept;
     void _SendLoop(std::stop_token stop) noexcept;
     void _SetAsyncError(HRESULT hr) noexcept;
@@ -55,6 +55,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> _queue12;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> _allocator12;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> _list12;
+    winrt::com_ptr<ID3D11Texture2D> _depth;
+    winrt::com_ptr<ID3D11Texture2D> _motion;
     winrt::com_ptr<ID3D11Texture2D> _confidence;
     HANDLE _frameEvent{};
 
@@ -77,6 +79,7 @@ private:
     nb::AdapterId _processingAdapter{};
     nb::Extent _extent{};
     nb::Format _colorFormat{nb::Format::Rgba8};
+    uint64_t _lastLocalSerial{};
 
     nb::Packet _currentPacket{};
     uint64_t _currentSerial{};
