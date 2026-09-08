@@ -17,7 +17,7 @@ struct ProducerConfig {
     bool requireDifferentAdapters{true};
 };
 struct ConsumerConfig {
-    uint64_t instance{}, viewport{AnyViewport}; Format colorFormat{Format::Rgba8};
+    uint64_t instance{}, viewport{AnyViewport}; Format colorFormat{Format::Unknown};
     bool requireDifferentAdapters{true};
 };
 class ProducerSession final {
