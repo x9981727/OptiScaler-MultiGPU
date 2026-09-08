@@ -28,26 +28,25 @@ once('''            dispatchScale(0,p->scaleColourPipeline.Get(),p->workColour.G
             dispatchScale(4,p->scaleMotionPipeline.Get(),p->workMotion.Get());''','colour source state')
 cpp.write_text(s,encoding='utf-8',newline='\n')
 
-# The fork snapshot omitted OptiScaler's committed binary build libraries.  Use the official
-# repository's committed build libraries as a controlled ABI probe, then let the real linker be
-# the compatibility gate.  This is preferable to guessing a synthetic vcxproj history fingerprint
-# after the fork added a large independent DLSS-NR feature set.
+# The fork snapshot omitted OptiScaler's committed binary build libraries. Use a full shallow clone
+# here: partial blob-less clones failed to materialize the committed .lib blobs on GitHub's Windows
+# runner. The full DLL link below remains the ABI compatibility gate.
 fork_project=root/'OptiScaler/OptiScaler.vcxproj'
 official=Path('D:/r7-optiscaler-build-deps')
 if official.exists(): shutil.rmtree(official)
-run(['git','clone','--filter=blob:none','--no-checkout','--depth=1','https://github.com/optiscaler/OptiScaler.git',official])
+run(['git','clone','--depth=1','https://github.com/optiscaler/OptiScaler.git',official])
 official_commit=out(['git','-C',official,'rev-parse','HEAD'])
-run(['git','-C',official,'checkout','HEAD','--','OptiScaler/library','external/freetype/freetype.lib'])
 source_library=official/'OptiScaler/library'
+freetype_src=official/'external/freetype/freetype.lib'
+if not source_library.exists(): raise RuntimeError('Official OptiScaler/library missing after full clone')
+if not freetype_src.exists(): raise RuntimeError('Official freetype.lib missing after full clone')
 target_library=root/'OptiScaler/library'
 if target_library.exists(): shutil.rmtree(target_library)
 shutil.copytree(source_library,target_library)
-freetype_src=official/'external/freetype/freetype.lib'
 freetype_dst=root/'external/freetype/freetype.lib'
+freetype_dst.parent.mkdir(parents=True,exist_ok=True)
 shutil.copy2(freetype_src,freetype_dst)
 
-# Contract: every private Release|x64 library named by the fork project must now resolve before
-# MSBuild starts. The subsequent full DLL link is the ABI compatibility test.
 project=fork_project.read_text(encoding='utf-8-sig')
 release_group=re.search(r'<ItemDefinitionGroup Condition="\'\$\(Configuration\)\|\$\(Platform\)\'==\'Release\|x64\'">(.*?)</ItemDefinitionGroup>',project,re.S)
 if not release_group: raise RuntimeError('Release|x64 project group missing')
@@ -82,7 +81,7 @@ for name in ('ScaleColourShader','ScaleMotionShader','ScaleDepthShader','Composi
     exports[name]={'sha256':hashlib.sha256(code.encode()).hexdigest(),'bytes':len(code.encode())}
 report={'backend_sha256':hashlib.sha256(cpp.read_bytes()).hexdigest(),'shaders':exports,
         'windows_minmax_macro_avoided':True,'sm5_uint64_dependency_removed':True,
-        'full_colour_state_restored':True,'dependency_source':'official OptiScaler committed build libraries',
+        'full_colour_state_restored':True,'dependency_source':'official OptiScaler full shallow clone',
         'official_dependency_commit':official_commit,'private_link_dependencies_verified':private_deps,
         'freetype_sha256':hashlib.sha256(freetype_dst.read_bytes()).hexdigest(),
         'vulkan_import_lib_source':str(vulkan_source),
