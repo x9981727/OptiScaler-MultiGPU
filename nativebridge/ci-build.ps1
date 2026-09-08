@@ -84,7 +84,13 @@ if(Test-Path (Join-Path $root 'build-magpie.ps1')) {
 # Magpie consumer compile gates are green.
 git -C $op submodule update --init --recursive --depth 1 2>&1 | Tee-Object (Join-Path $reports 'optiscaler-submodules.txt')
 if($LASTEXITCODE){throw 'OptiScaler submodule initialization failed'}
-msbuild (Join-Path $op 'OptiScaler.sln') /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal 2>&1 |
+$vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if(!(Test-Path $vswhere)){throw 'vswhere.exe not found'}
+$vsPath=& $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
+if(!$vsPath){throw 'Visual Studio installation with MSBuild not found'}
+$msbuild=Join-Path $vsPath 'MSBuild\Current\Bin\MSBuild.exe'
+if(!(Test-Path $msbuild)){throw "MSBuild.exe not found at $msbuild"}
+& $msbuild (Join-Path $op 'OptiScaler.sln') /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal 2>&1 |
  Tee-Object (Join-Path $reports 'optiscaler-build.txt')
 if($LASTEXITCODE){throw 'OptiScaler NativeBridge build failed'}
 $opOut=Join-Path $op 'x64/Release'
