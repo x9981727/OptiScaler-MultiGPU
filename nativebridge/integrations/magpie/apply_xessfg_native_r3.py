@@ -33,8 +33,13 @@ with tempfile.NamedTemporaryFile(delete=False, suffix='.patch') as f:
     f.write(patch)
     patch_path = Path(f.name)
 try:
-    subprocess.run(['git', '-C', str(root), 'apply', '--check', '--whitespace=nowarn', str(patch_path)], check=True)
-    subprocess.run(['git', '-C', str(root), 'apply', '--whitespace=nowarn', str(patch_path)], check=True)
+    # The r3 patch was assembled from reviewed chunks and some hunk line counts
+    # became stale while the contents remained intact. --recount recomputes only
+    # those counts; --check still requires every context line to match the pinned
+    # post-r2 source before anything is written.
+    common = ['git', '-C', str(root), 'apply', '--recount', '--whitespace=nowarn']
+    subprocess.run([*common, '--check', str(patch_path)], check=True)
+    subprocess.run([*common, str(patch_path)], check=True)
 finally:
     patch_path.unlink(missing_ok=True)
 
