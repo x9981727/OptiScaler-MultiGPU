@@ -8,10 +8,11 @@ namespace {
 HRESULT InvalidData() noexcept { return HRESULT_FROM_WIN32(ERROR_INVALID_DATA); }
 HRESULT NotSupported() noexcept { return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED); }
 bool ValidProducerConfig(const ProducerConfig& c) noexcept {
-    return c.instance && c.session && c.generation && c.viewport && valid_extent(c.extent) && valid_color_format(c.colorFormat);
+    return c.instance && c.session && c.generation && c.viewport != AnyViewport &&
+        valid_extent(c.extent) && valid_color_format(c.colorFormat);
 }
 bool ValidConsumerConfig(const ConsumerConfig& c) noexcept {
-    return c.instance && c.viewport && valid_color_format(c.colorFormat);
+    return c.instance && valid_color_format(c.colorFormat);
 }
 void RevokeAll(const ipc::Channel& channel, const std::vector<HANDLE>& remote) noexcept {
     for (HANDLE h : remote) if (h) (void)channel.RevokeUnsent(h);
@@ -46,7 +47,8 @@ HRESULT ProducerSession::Accept(DWORD timeoutMs) noexcept {
     ipc::Message requestMessage{}; hr = channel_.Receive(requestMessage, timeoutMs); if (FAILED(hr)) return hr;
     Hello request{};
     if (ParseHelloMessage(requestMessage, request) != Result::Ok || request.role != Role::ConsumerRequest) return InvalidData();
-    if (request.viewport != config_.viewport || request.colorFormat != config_.colorFormat) return InvalidData();
+    if ((request.viewport != AnyViewport && request.viewport != config_.viewport) ||
+        request.colorFormat != config_.colorFormat) return InvalidData();
     const AdapterId renderAdapter = endpoint_.Adapter();
     if (config_.requireDifferentAdapters && request.processingAdapter == renderAdapter) return NotSupported();
     Hello accept{}; accept.role = Role::ProducerAccept; accept.session = config_.session; accept.generation = config_.generation;
@@ -116,9 +118,11 @@ HRESULT ConsumerSession::Connect(DWORD producerPid, ID3D12Device* processingDevi
     Hello accept{}; HandleSet set{};
     if (ParseHelloMessage(acceptMessage,accept)!=Result::Ok || accept.role!=Role::ProducerAccept ||
         ParseHandleMessage(handlesMessage,set)!=Result::Ok) return InvalidData();
-    if (accept.viewport!=config.viewport || accept.processingAdapter!=processingAdapter || accept.colorFormat!=config.colorFormat ||
+    if ((config.viewport != AnyViewport && accept.viewport != config.viewport) ||
+        accept.processingAdapter!=processingAdapter || accept.colorFormat!=config.colorFormat ||
         set.session!=accept.session || set.generation!=accept.generation || set.renderAdapter!=accept.renderAdapter ||
-        set.processingAdapter!=accept.processingAdapter || set.extent!=accept.extent || set.colorFormat!=accept.colorFormat) return InvalidData();
+        set.processingAdapter!=accept.processingAdapter || set.extent!=accept.extent || set.colorFormat!=accept.colorFormat)
+        return InvalidData();
     if (config.requireDifferentAdapters && accept.renderAdapter==processingAdapter) return NotSupported();
     d3d12::Handles local{}; local.heap=DecodeHandle(set.heap);
     for(size_t i=0;i<kSlotCount;++i){local.ready[i]=DecodeHandle(set.ready[i]);local.done[i]=DecodeHandle(set.done[i]);}
