@@ -1,0 +1,47 @@
+name: Collect v26 runtime notices
+on:
+  push:
+    branches: [test/xefg-game-pacing-v26]
+    paths: ['.github/workflows/v26-notices.yml']
+permissions:
+  contents: read
+jobs:
+  notices:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+      - shell: powershell
+        run: |
+          python -m pip install pyinstaller==6.11.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          from pathlib import Path
+          import sys,shutil,importlib.metadata,hashlib,json
+          dest=Path('runtime-notices');dest.mkdir()
+          p=Path(sys.base_prefix)/'LICENSE.txt'
+          assert p.is_file(),p
+          shutil.copyfile(p,dest/'PYTHON-3.11.9-LICENSE.txt')
+          dist=importlib.metadata.distribution('pyinstaller')
+          found=[]
+          for item in dist.files:
+              if Path(str(item)).name.upper() in ('COPYING.TXT','LICENSE','LICENSE.TXT','LICENSE.RST','COPYING','NOTICE','NOTICE.TXT'):
+                  source=Path(dist.locate_file(item))
+                  if source.is_file():
+                      name='PyInstaller-'+str(item).replace('/','_').replace('\\','_')
+                      shutil.copyfile(source,dest/name);found.append(name)
+          assert found,'No PyInstaller license found'
+          record={'python':sys.version,'pyinstaller':dist.version,'files':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in dest.iterdir() if p.is_file()},'runtime_changes':'No changes to Python or PyInstaller bootloader; application scripts embedded using PyInstaller onefile.'}
+          (dest/'NOTICES-PROVENANCE.json').write_text(json.dumps(record,indent=2),encoding='utf-8')
+          print(json.dumps(record,indent=2))
+          '@ | Set-Content -Encoding UTF8 notices.py
+          python notices.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XeFG-v26-runtime-notices
+          path: runtime-notices/
+          if-no-files-found: error
+          retention-days: 14
