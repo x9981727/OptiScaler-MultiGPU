@@ -43,13 +43,22 @@ $buildCode=$LASTEXITCODE
 if(Test-Path (Join-Path $build 'Release')) {
  Get-ChildItem (Join-Path $build 'Release') -File | Where-Object {$_.Extension -in @('.exe','.lib','.dll')} | Copy-Item -Destination $dist
 }
-'Status: compiled components and diagnostics only; no complete game runtime claimed.' | Set-Content (Join-Path $dist 'STATUS.txt')
+'Status: NativeBridge transport/components compiled; Magpie consumer patch validation follows.' | Set-Content (Join-Path $dist 'STATUS.txt')
 if ($buildCode) {throw 'Windows build failed'}
 ctest --test-dir $build -C Release --output-on-failure 2>&1 | Tee-Object (Join-Path $reports 'windows-tests.txt')
 $testCode=$LASTEXITCODE
 & (Join-Path $build 'Release/native_bridge_adapters.exe') 2>&1 | Tee-Object (Join-Path $reports 'runner-adapters.txt')
-python (Join-Path $source 'tools/apply_magpie.py') $MagpieRoot --apply 2>&1 | Tee-Object (Join-Path $reports 'magpie-patch.txt')
-$patchCode=$LASTEXITCODE
+python (Join-Path $source 'tools/apply_magpie.py') $MagpieRoot --apply 2>&1 | Tee-Object (Join-Path $reports 'magpie-patch-r1.txt')
+$r1PatchCode=$LASTEXITCODE
+if(!$r1PatchCode){
+ python (Join-Path $source 'tools/apply_magpie_r2.py') $MagpieRoot --apply 2>&1 | Tee-Object (Join-Path $reports 'magpie-patch-r2.txt')
+ $r2PatchCode=$LASTEXITCODE
+} else {$r2PatchCode=1}
+if(!$r1PatchCode -and !$r2PatchCode){
+ python $exporter $MagpieRoot (Join-Path $dist 'patched-Magpie-NativeBridge-code-for-review.zip')
+ if($LASTEXITCODE){throw 'Patched Magpie source export failed'}
+}
 if($testCode){throw 'Windows tests failed'}
-if($patchCode){throw 'Pinned Magpie patch failed'}
+if($r1PatchCode){throw 'Pinned Magpie guidance patch failed'}
+if($r2PatchCode){throw 'Pinned Magpie runtime patch failed'}
 if(Test-Path (Join-Path $root 'build-magpie.ps1')) {& (Join-Path $root 'build-magpie.ps1') -MagpieRoot $MagpieRoot; if($LASTEXITCODE){throw 'Magpie build failed'}}
