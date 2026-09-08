@@ -41,6 +41,8 @@ public:
     HRESULT RecordWrite(uint32_t slot, ID3D12GraphicsCommandList* commandList,
         const std::array<ID3D12Resource*,3>& resources,
         const std::array<D3D12_RESOURCE_STATES,3>& states) noexcept;
+    HRESULT RecordWritePlane(uint32_t slot, uint32_t plane, ID3D12GraphicsCommandList* commandList,
+        ID3D12Resource* resource, D3D12_RESOURCE_STATES state) noexcept;
     HRESULT SignalReady(ID3D12CommandQueue* queue, Token token) noexcept;
     HRESULT PollDone(Token token) const noexcept;
     HRESULT SendFrame(Token token, const Packet& packet, uint64_t nowNs, DWORD timeoutMs) noexcept;
@@ -70,6 +72,8 @@ public:
     HRESULT RecordRead(uint32_t slot, ID3D12GraphicsCommandList* commandList,
         const std::array<ID3D12Resource*,3>& resources,
         const std::array<D3D12_RESOURCE_STATES,3>& states) noexcept;
+    HRESULT RecordReadPlane(uint32_t slot, uint32_t plane, ID3D12GraphicsCommandList* commandList,
+        ID3D12Resource* resource, D3D12_RESOURCE_STATES state) noexcept;
     HRESULT PollReady(Token token) const noexcept;
     HRESULT SignalDone(ID3D12CommandQueue* queue, Token token) noexcept;
     HRESULT SendRelease(Token token, DWORD timeoutMs) noexcept;
