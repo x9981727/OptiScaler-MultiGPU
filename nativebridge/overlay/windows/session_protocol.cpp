@@ -19,13 +19,12 @@ struct Reader {
     AdapterId adapter(){AdapterId a;a.low=u32();a.high=std::bit_cast<int32_t>(u32());return a;}
 };
 bool validAdapter(AdapterId a){return a.low!=0 || a.high!=0;}
-bool validColor(Format f){return f==Format::Rgba8 || f==Format::Bgra8;}
 bool allZero(const std::byte* begin,const std::byte* end){return std::all_of(begin,end,[](std::byte b){return b==std::byte{};});}
 }
 
 Result MakeHelloMessage(const Hello& h, ipc::Message& out) noexcept {
     if((h.role!=Role::ConsumerRequest && h.role!=Role::ProducerAccept) || !validAdapter(h.processingAdapter) ||
-       !validColor(h.colorFormat)) return Result::Values;
+       !valid_color_format(h.colorFormat)) return Result::Values;
     if(h.role==Role::ConsumerRequest) {
         if(h.session || h.generation || validAdapter(h.renderAdapter)) return Result::Values;
     } else if(!h.session || !h.generation || !h.viewport || !validAdapter(h.renderAdapter) ||
@@ -47,7 +46,7 @@ Result ParseHelloMessage(const ipc::Message& m, Hello& out) noexcept {
 }
 Result MakeHandleMessage(const HandleSet& h, ipc::Message& out) noexcept {
     if(!h.session||!h.generation||!validAdapter(h.renderAdapter)||!validAdapter(h.processingAdapter)||
-       !valid_extent(h.extent)||!validColor(h.colorFormat)||!h.heap)return Result::Values;
+       !valid_extent(h.extent)||!valid_color_format(h.colorFormat)||!h.heap)return Result::Values;
     for(size_t i=0;i<kSlotCount;++i)if(!h.ready[i]||!h.done[i])return Result::Values;
     ipc::Message m{};m.kind=ipc::Kind::Handles;m.length=uint32_t(HandleBytes);Writer w{m.payload.data()};
     w.u32(HandleMagic);w.u32(ProtocolVersion);w.u64(h.session);w.u64(h.generation);
