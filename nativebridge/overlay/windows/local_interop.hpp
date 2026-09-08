@@ -13,33 +13,31 @@
 namespace nb::d3d12 {
 using Microsoft::WRL::ComPtr;
 
-// Same-adapter D3D12 -> D3D11 handoff used by the Magpie consumer.
-// The cross-adapter transport lands into these D3D12 textures, restores them
-// to COMMON, signals a shared fence, and Magpie waits on that fence from D3D11.
+// Same-adapter handoff for the Magpie consumer. Magpie owns ordinary D3D11
+// textures. The consumer D3D12 device opens NT handles to those textures and
+// writes the cross-adapter frame into them, then signals a fence created by the
+// D3D11 device. This is the same direction Magpie already uses for its existing
+// D3D11/D3D12 guidance interop.
 class LocalInteropFrame {
 public:
     LocalInteropFrame() = default;
     LocalInteropFrame(const LocalInteropFrame&) = delete;
     LocalInteropFrame& operator=(const LocalInteropFrame&) = delete;
-    ~LocalInteropFrame();
 
-    HRESULT Create(ID3D12Device* device, const Layout& layout) noexcept;
-    HRESULT OpenD3D11(
-        ID3D11Device5* device,
-        std::array<ComPtr<ID3D11Texture2D>, 3>& textures,
-        ComPtr<ID3D11Fence>& fence) const noexcept;
+    HRESULT Create(ID3D11Device5* device11, ID3D12Device* device12, const Layout& layout) noexcept;
     HRESULT Signal(ID3D12CommandQueue* queue, uint64_t value) noexcept;
 
-    std::array<ID3D12Resource*, 3> Resources() const noexcept;
-    const std::array<ComPtr<ID3D12Resource>, 3>& TextureObjects() const noexcept { return textures_; }
+    std::array<ID3D12Resource*, 3> Resources12() const noexcept;
+    const std::array<ComPtr<ID3D11Texture2D>, 3>& Textures11() const noexcept { return textures11_; }
+    ID3D11Fence* Fence11() const noexcept { return fence11_.Get(); }
     AdapterId Adapter() const noexcept { return adapter_; }
 
 private:
-    ComPtr<ID3D12Device> device_;
-    std::array<ComPtr<ID3D12Resource>, 3> textures_;
-    std::array<HANDLE, 3> textureHandles_{};
-    ComPtr<ID3D12Fence> fence_;
-    HANDLE fenceHandle_{};
+    ComPtr<ID3D12Device> device12_;
+    std::array<ComPtr<ID3D11Texture2D>, 3> textures11_;
+    std::array<ComPtr<ID3D12Resource>, 3> textures12_;
+    ComPtr<ID3D11Fence> fence11_;
+    ComPtr<ID3D12Fence> fence12_;
     AdapterId adapter_{};
     uint64_t lastSignal_{};
 };
