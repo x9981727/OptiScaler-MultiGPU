@@ -22,6 +22,11 @@ new='''    if (gate.armed && hwnd==gate.target && BufferedOutputLab::Enabled()) 
         h=realCreate(f,screen.Get(),hwnd,d,fs,o,sc);
         if(FAILED(h))return h;
         if(!sc||!*sc)return E_UNEXPECTED;
+        if (Gate::Yes("XEFG_BUFFERED_FENCE")) {
+            h=gate.Setup(*sc,screen.Get());
+            if(FAILED(h)){(*sc)->Release();*sc=nullptr;return h;}
+            BufferedOutputLab::scheduleOutputGate=[](){return gate.Schedule();};
+        }
         try {BufferedOutputLab::Initialize(*sc,producer.Get(),screen.Get());}
         catch(...) {(*sc)->Release();*sc=nullptr;return E_FAIL;}
         return h;
@@ -29,7 +34,18 @@ new='''    if (gate.armed && hwnd==gate.target && BufferedOutputLab::Enabled()) 
 ''' + old
 once(old,new)
 once('extern "C" void FinishNativeGate() {gate.Finish();}', 'extern "C" void FinishNativeGate() {BufferedOutputLab::Finish();gate.Finish();}')
-p.write_text(s,encoding='utf-8');shutil.copyfile(repo/'lab-native-gate/buffered_output.h',root/'buffered_output.h')
-m={'kind':'isolated_buffered_native_output_prototype','game_modified':False,'game_release':False,'input_shaders_or_resolution_changed':False,'native_outputs_fifo':True,'snapshot_slots':8,'fullscreen_resize_not_supported':True,'performance_and_pixel_acceptance':False,'native_source_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'staging_header_sha256':hashlib.sha256((root/'buffered_output.h').read_bytes()).hexdigest()}
+p.write_text(s,encoding='utf-8')
+hp=repo/'lab-native-gate/buffered_output.h';h=hp.read_text(encoding='utf-8-sig')
+def header_once(old,new):
+ global h
+ if h.count(old)!=1:raise RuntimeError('Header anchor: '+old[:100])
+ h=h.replace(old,new)
+header_once('using Clock=std::chrono::steady_clock;', 'using Clock=std::chrono::steady_clock;\ninline HRESULT (*scheduleOutputGate)()=nullptr;')
+header_once('if(deadline.time_since_epoch().count()==0||!paced||stop)deadline=now;', 'if(deadline.time_since_epoch().count()==0||!paced||stop||scheduleOutputGate)deadline=now;')
+header_once('   {Actual scope;Check(Original<PresentFn>(8)(chain.Get(),job.sync,job.flags));}', '   if(scheduleOutputGate)Check(scheduleOutputGate());\n   {Actual scope;Check(Original<PresentFn>(8)(chain.Get(),job.sync,job.flags));}')
+# Update the generated header in this isolated checkout so the source-review copy
+# is byte-identical to the compiler input. The repository recipe stays readable.
+hp.write_text(h,encoding='utf-8');shutil.copyfile(hp,root/'buffered_output.h')
+m={'kind':'isolated_buffered_native_output_prototype','game_modified':False,'game_release':False,'input_shaders_or_resolution_changed':False,'native_outputs_fifo':True,'snapshot_slots':8,'fullscreen_resize_not_supported':True,'performance_and_pixel_acceptance':False,'optional_independent_display_release_thread':True,'native_source_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'staging_header_sha256':hashlib.sha256((root/'buffered_output.h').read_bytes()).hexdigest()}
 (root/'BUFFERED-OUTPUT-MANIFEST.json').write_text(json.dumps(m,indent=2),encoding='utf-8')
 print('Isolated buffered output prototype prepared. Not suitable for game deployment.')
