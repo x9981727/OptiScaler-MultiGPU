@@ -1,0 +1,147 @@
++		if (_isXeSSFrameGenerationActive &&
++			(_nativeBridgeRequested || _xessMotionRequest.method != OpticalFlowMethod::None)) {
+ 			D3D11_TEXTURE2D_DESC motionDesc{};
+ 			motionDesc.Width = desc.Width;
+ 			motionDesc.Height = desc.Height;
+@@ -2282,6 +2362,41 @@
+ 			}
+ 			_sharedMotionTextureHandles[i].reset(motionHandle);
+ 		}
++		if (_isXeSSFrameGenerationActive && _nativeBridgeRequested) {
++			D3D11_TEXTURE2D_DESC depthDesc{};
++			depthDesc.Width = desc.Width;
++			depthDesc.Height = desc.Height;
++			depthDesc.MipLevels = 1;
++			depthDesc.ArraySize = 1;
++			depthDesc.Format = DXGI_FORMAT_R32_FLOAT;
++			depthDesc.SampleDesc.Count = 1;
++			depthDesc.Usage = D3D11_USAGE_DEFAULT;
++			depthDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
++			depthDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
++				D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
++			HRESULT depthHr = _backendResources.GetD3DDevice()->CreateTexture2D(
++				&depthDesc, nullptr, _backendSharedDepthTextures[i].put());
++			if (FAILED(depthHr)) {
++				Logger::Get().ComError("Create XeSSFG shared native depth texture failed", depthHr);
++				return NULL;
++			}
++			_backendSharedDepthTextureMutexes[i] =
++				_backendSharedDepthTextures[i].try_as<IDXGIKeyedMutex>();
++			winrt::com_ptr<IDXGIResource1> depthDxgiResource =
++				_backendSharedDepthTextures[i].try_as<IDXGIResource1>();
++			if (!_backendSharedDepthTextureMutexes[i] || !depthDxgiResource) {
++				Logger::Get().Error("Create XeSSFG shared native depth synchronization failed");
++				return NULL;
++			}
++			HANDLE depthHandle = nullptr;
++			depthHr = depthDxgiResource->CreateSharedHandle(
++				nullptr, GENERIC_ALL, nullptr, &depthHandle);
++			if (FAILED(depthHr) || !depthHandle) {
++				Logger::Get().ComError("Create XeSSFG native depth NT handle failed", depthHr);
++				return NULL;
++			}
++			_sharedDepthTextureHandles[i].reset(depthHandle);
++		}
+ 		_sharedTextureAvailableEvents[i].reset(
+ 			CreateEventW(nullptr, FALSE, TRUE, nullptr));
+ 		if (!_sharedTextureAvailableEvents[i]) {
+@@ -2622,7 +2737,8 @@
+ 
+ 	const FrameGuidanceRequirements guidanceRequirements =
+ 		CollectFrameGuidanceRequirements(
+-			_nativeEffectBackends, _dlssFrameGenerator.get(), _xessMotionRequest);
++			_nativeEffectBackends, _dlssFrameGenerator.get(), _xessMotionRequest,
++			_frameSource && _frameSource->UsesNativeGuidance() && _isXeSSFrameGenerationActive);
+ 	_motionConsumers.clear();
+ 	for (size_t i = 0; i < _runtimeEffectOptions.size(); ++i) {
+ 		const auto& effect = _runtimeEffectOptions[i];
+@@ -2750,7 +2866,8 @@
+ 		FrameTrace::Mark(FrameTrace::Event::CaptureAccepted, _frameSource->CaptureTimestamp100ns(), sequence);
+ 		const FrameGuidanceRequirements guidanceRequirements =
+ 			CollectFrameGuidanceRequirements(
+-				_nativeEffectBackends, _dlssFrameGenerator.get(), _xessMotionRequest);
++				_nativeEffectBackends, _dlssFrameGenerator.get(), _xessMotionRequest,
++				_frameSource && _frameSource->UsesNativeGuidance() && _isXeSSFrameGenerationActive);
+ 		if (_frameGuidanceService.IsInitialized()) {
+ 			FrameTrace::Scope traceGuidance(FrameTrace::Event::Guidance);
+ 			if (_frameSource->UsesNativeGuidance()) {
+@@ -2910,17 +3027,46 @@
+ 	};
+ 
+ 	ID3D11Texture2D* xessMotion = nullptr;
++	ID3D11Texture2D* xessDepth = nullptr;
++	nb::Camera xessNativeCamera{};
+ 	FrameGuidanceFrameId xessMotionFrameId = _capturedFrameId;
+ 	bool xessMotionValid = false;
+ 	bool xessMotionReset = true;
+-	if (!generatedFrame && _xessMotionRequest.method != OpticalFlowMethod::None) {
++	bool xessNativeValid = false;
++	if (!generatedFrame && _isXeSSFrameGenerationActive &&
++		(_nativeBridgeRequested || _xessMotionRequest.method != OpticalFlowMethod::None)) {
+ 		D3D11_TEXTURE2D_DESC textureDesc{};
+ 		texture->GetDesc(&textureDesc);
+ 		const FrameGuidanceExtent extent{ textureDesc.Width, textureDesc.Height };
+ 		const FrameGuidanceConsumerViews guidance =
+ 			_frameGuidanceService.GetConsumerViews(
+ 				_capturedFrameId, extent, _xessMotionRequest);
+-		if (guidance.produced.IsValidFor(_capturedFrameId, extent) &&
++		if (guidance.produced.nativeRequired &&
++			guidance.produced.IsNativeFor(_capturedFrameId, extent)) {
++			xessMotion = guidance.produced.motion.texture;
++			xessDepth = guidance.produced.depth.texture;
++			xessNativeCamera = guidance.produced.nativeCamera;
++			xessMotionReset = guidance.produced.requiresHistoryReset;
++			bool synchronized = true;
++			for (const FrameGuidanceResource* resource :
++				{ &guidance.produced.motion, &guidance.produced.depth }) {
++				const FrameGuidanceSyncPoint sync = resource->metadata.sync;
++				if (sync.fence && sync.value && FAILED(d3dDC->Wait(sync.fence, sync.value))) {
++					synchronized = false;
++					break;
++				}
++			}
++			if (!synchronized) {
++				Logger::Get().Warn("XeSSFG native guidance synchronization failed; dropping native guidance");
++				xessMotion = nullptr;
++				xessDepth = nullptr;
++				xessMotionReset = true;
++			} else {
++				xessMotionValid = true;
++				xessNativeValid = true;
++			}
++		} else if (_xessMotionRequest.method != OpticalFlowMethod::None &&
++			guidance.produced.IsValidFor(_capturedFrameId, extent) &&
+ 			!guidance.produced.motion.metadata.isZero) {
+ 			xessMotion = guidance.produced.motion.texture;
+ 			xessMotionReset = guidance.produced.requiresHistoryReset;
+@@ -2944,10 +3090,11 @@
+ 		const uint64_t currentKey =
+ 			_sharedTextureMutexKeys[sharedTextureSlot].load(std::memory_order_acquire);
+ 		const uint64_t key = currentKey + 1;
+-		std::array<IDXGIKeyedMutex*, 3> mutexes{
++		std::array<IDXGIKeyedMutex*, 4> mutexes{
+ 			_backendSharedTextureMutexes[sharedTextureSlot].get(),
+ 			_passThroughFrames.BackendMutex(sharedTextureSlot),
+-			_backendSharedMotionTextureMutexes[sharedTextureSlot].get() };
++			_backendSharedMotionTextureMutexes[sharedTextureSlot].get(),
++			_backendSharedDepthTextureMutexes[sharedTextureSlot].get() };
+ 		size_t failedIndex = mutexes.size();
+ 		hr = AcquirePresentationTextures(mutexes, currentKey, 250, &failedIndex);
+ 		if (FAILED(hr) && failedIndex == 1) {
+@@ -2967,10 +3114,16 @@
+ 			if (mutexes[2] && xessMotionValid) {
+ 				d3dDC->CopyResource(_backendSharedMotionTextures[sharedTextureSlot].get(), xessMotion);
+ 			}
++			if (mutexes[3] && xessNativeValid && xessDepth) {
++				d3dDC->CopyResource(_backendSharedDepthTextures[sharedTextureSlot].get(), xessDepth);
++			}
+ 			_sharedMotionFrameIds[sharedTextureSlot].store(xessMotionFrameId, std::memory_order_release);
+ 			_sharedMotionValid[sharedTextureSlot].store(xessMotionValid, std::memory_order_release);
+ 			_sharedMotionReset[sharedTextureSlot].store(xessMotionReset || !xessMotionValid,
+ 				std::memory_order_release);
++			_sharedNativeCameras[sharedTextureSlot] = xessNativeCamera;
++			_sharedNativeGuidanceValid[sharedTextureSlot].store(
++				xessNativeValid, std::memory_order_release);
+ 			hr = ReleasePresentationTextures(mutexes, key);
+ 			if (SUCCEEDED(hr)) _sharedTextureMutexKeys[sharedTextureSlot].store(key, std::memory_order_release);
+ 		}
