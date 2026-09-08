@@ -23,9 +23,8 @@ inline void write_word(std::span<Byte> s,size_t at,std::uint32_t bits){
     for(size_t j=0;j<4;++j)s[at+j]=Byte(bits>>(8*j));
 }
 inline bool permitted_gain(float g){return std::isfinite(g) && (g==0.0f || g==0.125f || g==1.0f);}
-// The owner must synchronize outstanding GPU work BEFORE constructing this
-// guard and BEFORE normal restoration. This changes four HOST argument bytes
-// only; no device pointers, tensor layout or grid/block are edited.
+// Synchronize outstanding GPU work before constructing the guard and before
+// normal restoration. Only four HOST argument bytes are changed.
 class ScopedControl final {
     std::span<Byte> target_;
     std::array<Byte,argument_bytes> before_{};
@@ -74,7 +73,7 @@ inline size_t self_test(){
     auto rejected=[&](auto operation){bool failed=false;try{operation();}catch(const std::runtime_error&){failed=true;}test(failed);test(v==original);};
     for(float g:{-1.0f,0.5f,2.0f,std::numeric_limits<float>::infinity(),std::numeric_limits<float>::quiet_NaN()})
         rejected([&](){ScopedControl guard(v,pointers,g);});
-    for(size_t at:{129u,132u,136u,139u,161u,168u,SIZE_MAX}){
+    for(size_t at:std::array<size_t,7>{129,132,136,139,161,168,std::numeric_limits<size_t>::max()}){
         std::array<size_t,1> bad{at};rejected([&](){ScopedControl guard(v,bad,1.0f);});
     }
     std::vector<Byte> shortArg(167);rejected([&](){ScopedControl guard(shortArg,pointers,1.0f);});
