@@ -16,7 +16,6 @@ expected = {
 def blob_sha(data: bytes) -> str:
     return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
 
-# Hash-lock every input before normalizing line endings.
 texts = {}
 for name, sha in expected.items():
     path = core / name
@@ -31,10 +30,8 @@ if len(parts) != 6:
     raise SystemExit(f'expected 6 patch parts, found {len(parts)}')
 patch = b''.join(p.read_bytes() for p in parts).decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
 
-# Parse the reviewed unified diff without trusting stale hunk line counts. Each
-# old hunk body must still exist exactly once in the SHA-locked post-r2 file.
 file_re = re.compile(r'^--- a/src/Magpie\.Core/([^\n]+)\n\+\+\+ b/src/Magpie\.Core/\1\n', re.M)
-hunk_re = re.compile(r'^@@[^\n]*@@[^\n]*\n', re.M)
+hunk_re = re.compile(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@[^\n]*\n', re.M)
 file_matches = list(file_re.finditer(patch))
 if len(file_matches) != len(expected):
     raise SystemExit(f'expected {len(expected)} file sections, found {len(file_matches)}')
@@ -50,7 +47,9 @@ for fi, fm in enumerate(file_matches):
         raise SystemExit(f'{name}: no hunks found')
     text = texts[name]
     applied = 0
+    line_delta = 0
     for hi, hm in enumerate(hunks):
+        old_start = int(hm.group(1))
         body_end = hunks[hi + 1].start() if hi + 1 < len(hunks) else len(section)
         body = section[hm.end():body_end]
         old_lines, new_lines = [], []
@@ -71,10 +70,33 @@ for fi, fm in enumerate(file_matches):
         new = ''.join(new_lines)
         if not old:
             raise SystemExit(f'{name}: empty old block is not allowed')
-        count = text.count(old)
-        if count != 1:
-            raise SystemExit(f'{name}: hunk {hi + 1} old block matches {count} times')
-        text = text.replace(old, new, 1)
+
+        positions = []
+        pos = text.find(old)
+        while pos != -1:
+            positions.append(pos)
+            pos = text.find(old, pos + 1)
+        if not positions:
+            raise SystemExit(f'{name}: hunk {hi + 1} old block not found')
+        if len(positions) == 1:
+            chosen = positions[0]
+        else:
+            expected_line = old_start + line_delta
+            ranked = sorted(
+                (abs((text.count('\n', 0, p) + 1) - expected_line), p) for p in positions
+            )
+            if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+                raise SystemExit(
+                    f'{name}: hunk {hi + 1} has ambiguous nearest matches at distance {ranked[0][0]}'
+                )
+            chosen = ranked[0][1]
+            actual_line = text.count('\n', 0, chosen) + 1
+            print(
+                f'{name}: hunk {hi + 1} disambiguated {len(positions)} matches; '
+                f'expected line {expected_line}, chose line {actual_line}'
+            )
+        text = text[:chosen] + new + text[chosen + len(old):]
+        line_delta += len(new_lines) - len(old_lines)
         applied += 1
     texts[name] = text
     print(f'{name}: applied {applied} deterministic hunks')
