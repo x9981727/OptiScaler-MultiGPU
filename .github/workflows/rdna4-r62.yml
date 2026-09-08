@@ -19,7 +19,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y clang-19 llvm-19 lld-19
           python -m pip install pyelftools==0.32 msgpack==1.1.1
-      - name: Test control guards and inspect exact reported terminal bytes
+      - name: Test control guards and sparse terminal regression fixture
         run: python rdna4/autolab_r62/test_and_inspect.py
       - name: Rebuild byte-identical r4 GPU code
         run: |
@@ -137,7 +137,8 @@ jobs:
             windows_cpu_and_zip_tests_passed=$true
             linux_control_guard_configurations=@('debug','sanitized','optimized')
             linux_regressions_passed=$true
-            reported_terminal_argument_fragment_read=$true
+            reconstructed_terminal_argument_fixture_checked=$true
+            actual_user_result_file_read_in_ci=$false
             original_full_checkpoint_read_in_ci=$false
             unchanged_r4_gpu_code_verified=$true
             experimental_control_byte_offset=136
@@ -154,6 +155,13 @@ jobs:
             '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$_.FullName.Substring($root.Length+1).Replace('\','/')
           } | Set-Content R62_SHA256SUMS.txt -Encoding ascii
           Move-Item R62_SHA256SUMS.txt package/SHA256SUMS.txt
+          foreach ($entry in (Get-Content package/SHA256SUMS.txt)) {
+            $expected=$entry.Substring(0,64)
+            $relative=$entry.Substring(66)
+            $actual=(Get-FileHash (Join-Path package $relative) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "Package checksum mismatch: $relative" }
+          }
+          Write-Output 'All packaged file hashes verified.'
       - name: Publish ready-to-run manual test ZIP
         uses: actions/upload-artifact@v4
         with:
