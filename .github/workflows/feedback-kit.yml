@@ -1,0 +1,98 @@
+name: Package reproducible XeFG feedback lab
+on:
+  push:
+    branches: [test/xefg-native-display-gate]
+    paths: [.github/workflows/feedback-kit.yml, 'lab-tools/display_feedback*.py', lab-tools/prepare_feedback_v3.py, lab-tools/test_feedback_v3.py, lab-tools/analyze_feedback.py, lab-tools/run_feedback_lab.py]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: XeFG-display-feedback-prototype
+          run-id: 34190185266
+          github-token: ${{ github.token }}
+          path: package
+      - name: Reconstruct and regression-test controller sources
+        shell: pwsh
+        run: |
+          python lab-tools/prepare_feedback_v3.py
+          if ($LASTEXITCODE -ne 0) { throw 'Reconstruction failed' }
+          Push-Location lab-tools
+          python -m unittest test_feedback_v3 -v 2>&1 | Tee-Object -FilePath unit-tests.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Controller tests failed' }
+          Pop-Location
+          New-Item package/tools -ItemType Directory -Force | Out-Null
+          Copy-Item lab-tools/display_feedback.py,lab-tools/display_feedback_v2.py,lab-tools/display_feedback_v3.py,lab-tools/prepare_feedback_v3.py,lab-tools/test_feedback_v3.py,lab-tools/analyze_feedback.py,lab-tools/run_feedback_lab.py,lab-tools/feedback-v3-source.json,lab-tools/unit-tests.txt package/tools/
+          New-Item package/rebuild -ItemType Directory -Force | Out-Null
+          Copy-Item .github/workflows/native-display-gate.yml,.github/workflows/feedback-kit.yml,lab-ring/apply_reference_ring.py package/rebuild/
+      - name: Fetch the same public PresentMon binary used by the physical tests
+        shell: pwsh
+        run: |
+          $url='https://github.com/GameTechDev/PresentMon/releases/download/v2.5.1/PresentMon-2.5.1-x64.exe'
+          Invoke-WebRequest $url -OutFile package/tools/PresentMon-2.5.1-x64.exe
+          if ((Get-FileHash package/tools/PresentMon-2.5.1-x64.exe).Hash -ne '9BEC3083069F58F911E6A512F4806DB51A27BD096103087BC1D05EF54C80A191') { throw 'PresentMon checksum mismatch' }
+          Invoke-WebRequest 'https://raw.githubusercontent.com/GameTechDev/PresentMon/v2.5.1/LICENSE.txt' -OutFile package/tools/PRESENTMON-LICENSE.txt
+          if ((Get-FileHash package/bin/Release/basic_xess_fg_sample.exe).Hash -ne 'BD3EA992E388DC809635727D5E41023B48C08E788A74C2A512D289579C9FB415') { throw 'Sample provenance mismatch' }
+      - name: Validate packaging without claiming hardware results
+        shell: pwsh
+        run: |
+          python package/tools/run_feedback_lab.py --dry-run
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged runner dry-run failed' }
+          & package/bin/Release/native_stage_test.exe | Tee-Object package/packaged-copy-test.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged copy regression failed' }
+          @'
+          @echo off
+          setlocal
+          if exist "%LocalAppData%\Programs\Python\Python313\python.exe" (
+            set "PY="%LocalAppData%\Programs\Python\Python313\python.exe""
+            goto run
+          )
+          where py >nul 2>&1
+          if not errorlevel 1 (set "PY=py -3"&goto run)
+          where python >nul 2>&1
+          if not errorlevel 1 (set "PY=python"&goto run)
+          echo Python 3.10 or later is required. No game or system file was modified.
+          pause
+          exit /b 1
+          :run
+          %PY% "%~dp0tools\run_feedback_lab.py" %*
+          set "RESULT=%ERRORLEVEL%"
+          pause
+          exit /b %RESULT%
+          '@ | Set-Content package/Run_Isolated_60s.cmd -Encoding ascii
+          @'
+          XeFG 自動呈現校正：完整隔離測試包
+          此包不是 OptiScaler 遊戲更新版，不要覆蓋遊戲資料夾。
+
+          雙擊 Run_Isolated_60s.cmd 會啟動包內的獨立 Intel XeFG 範例，預設 GPU 0、3840x2160、來源上限 67 FPS、60 秒；使用實際顯示事件自動調整相位。需要 Python 3.10+，不需要額外 Python 套件。測試時不要切換前景視窗。
+
+          內含：已測試的 Windows EXE、XeFG/XeLL DLL、PresentMon 2.5.1、三種控制器、同時鐘分析器、回歸測試及原始修改腳本。結果保存在本包 results 子目錄。程式不尋找、不安裝、不修改任何遊戲 DLL/INI。
+
+          預設 original 是已在 67→134 固定週期測試中取得改善的演算法。latency 是帶有更嚴格資料檢查的試驗版；midpoint 是保留供對照的試驗版，其實機結果不如預期；off 僅觀察。請勿把 CI 或純軟體測試當成遊戲驗收。
+
+          測試保留診斷用 9 ms SDK frameRenderTime 提示及 XeLL sleep bypass。固定輸出週期由 --fps 計算，不是已解決任意浮動幀率。--dynamic-period 仍是實驗選項，已有來源 FPS 下滑紀錄，不建議使用。
+
+          顯示事件可包含 tearing 的部分掃描。分析中的延遲只計算原生輸出提交到 ETW 顯示事件，並非滑鼠輸入到光子。沒有逐張證明生成畫面的品質或獨特性。
+
+          此原型尚未支援遊戲所需的完整 ResizeBuffers、HDR 切換、FG 開關及裝置重建生命週期，不可直接用作遊戲 DXGI 外掛。不能稱作完美修復或最終版。
+
+          可用命令列：Run_Isolated_60s.cmd --gpu 0 --fps 55 --controller original
+          對照測試：Run_Isolated_60s.cmd --controller off
+          純檔案檢查：python tools/run_feedback_lab.py --dry-run
+          回歸測試：在 tools 目錄執行 python -m unittest test_feedback_v3 -v
+          '@ | Set-Content package/README_繁體中文.txt -Encoding utf8
+          @{kind='reproducible_isolated_lab_not_game_release'; base_run=34190185266; base_artifact=10041933943; controllers_commit=$env:GITHUB_SHA; game_modified=$false; optical_or_game_certified=$false} | ConvertTo-Json | Set-Content package/PACKAGE-PROVENANCE.json
+          Get-ChildItem package -Recurse -File | Where-Object { $_.Name -ne 'PACKAGE-SHA256.txt' } | Get-FileHash | ForEach-Object { "$($_.Hash)  $($_.Path.Substring((Resolve-Path package).Path.Length+1))" } | Set-Content package/PACKAGE-SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XeFG-Automatic-Feedback-Complete-Lab
+          path: package/
+          retention-days: 7
+          if-no-files-found: error
