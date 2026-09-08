@@ -37,7 +37,7 @@ jobs:
                 'correlation.py':'9d4afb23c3374b262acd4f7a8022d52d25ea178a7173a631c6969e14172ca5d3',
                 'test_game.py':'048089981ddbb688ca7eb640f82038477730abeea3a6de0e15ce927ea32459c8',
                 'test_correlation.py':'882e0a41c17acd3abc97e772f75ca7cded70be15646e97ea198f46889cca6a11',
-                'install_game.py':'a6f9e6c9d6b1f857c22b35f1c11820b67368a23b6f4714fd06d4f2cc95147212'
+                'install_game.py':'a09a17e848671ed1fc3c26efb9c6286cfba8f175858bcb6151f751f09ba61c35'
               }
               for name,h in hashes.items():
                   data=z.read('source/'+name).replace(b'\r\n',b'\n')
