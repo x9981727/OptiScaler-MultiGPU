@@ -22,7 +22,18 @@ once('void BasicSample::OnDestroy()\n{',
 once('    ThrowIfFailed(xefgSwapChainDestroy(m_xefgSwapChain), "Failed to destroy XeSS-FG swap chain context");',
      '    ThrowIfFailed(xefgSwapChainDestroy(m_xefgSwapChain), "Failed to destroy XeSS-FG swap chain context");\n    NativeGateLab::Finish();')
 p.write_text(s,encoding="utf-8")
-shutil.copyfile(Path(__file__).parent/"NativeGate.h",root/"NativeGate.h")
+h=(Path(__file__).parent/"NativeGate.h").read_text(encoding="utf-8")
+old='''                    target=std::max(ready,lastRelease+r.period*0.5);
+                    if(target-ready>r.period) target=ready; // no accumulated latency debt'''
+new='''                    const double step=r.period*0.5;
+                    target=lastRelease>0 ? lastRelease+step : ready;
+                    // Absolute deadlines: never add timer overshoot to every period.
+                    // Rebase only after a large miss/stall, not normal wake jitter.
+                    if(ready>target+step || target>ready+r.period) target=ready;'''
+if h.count(old)!=1 or h.count('lastRelease=released;')!=1:
+    raise RuntimeError('Absolute deadline anchor mismatch')
+h=h.replace(old,new).replace('lastRelease=released;','lastRelease=target;')
+(root/"NativeGate.h").write_text(h,encoding="utf-8")
 cm=root/"CMakeLists.txt"
 text=cm.read_text(encoding="utf-8-sig")
 text += '\nset_property(TARGET basic_xess_fg_sample PROPERTY CXX_STANDARD 17)\n'
@@ -31,7 +42,7 @@ cm.write_text(text,encoding="utf-8")
  "kind":"isolated_native_queue_gate_probe_not_game_patch",
  "source_before":before,"source_after":hashlib.sha256(p.read_bytes()).hexdigest(),
  "header_sha256":hashlib.sha256((root/"NativeGate.h").read_bytes()).hexdigest(),
- "no_resolution_or_shader_changes":True,"no_original_present_drops":True,
+ "absolute_deadlines":True,"no_resolution_or_shader_changes":True,"no_original_present_drops":True,
  "gate_default":False,"sleep_bypass_default":False,"game_modified":False
 },indent=2),encoding="utf-8")
 print("Native display queue probe patched; output experiments require hardware validation.")
