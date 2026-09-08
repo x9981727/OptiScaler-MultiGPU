@@ -1,0 +1,165 @@
+name: RDNA4 r6.1 manual-test delivery
+on:
+  push:
+    branches: [dlssnr-rdna4-r61-timing-boundary]
+    paths: ['rdna4/autolab_r61/**', '.github/workflows/rdna4-r61.yml']
+permissions:
+  contents: read
+concurrency:
+  group: rdna4-r61-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler and inspection tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-19 llvm-19 lld-19
+          python -m pip install pyelftools==0.32 msgpack==1.1.1
+      - name: Rebuild the exact already-tested r4 GPU binary
+        run: |
+          python rdna4/layer_r4/build_layer.py
+          echo '62c8ecf66e4290ffbe22230a376b475ef482807fe05c46b957457bff5826cffe  rdna4/layer_r4/build/head_r4_gfx1201.hsaco' | sha256sum -c -
+      - name: Prepare fixed parser and r6.1 delivery source
+        run: |
+          python rdna4/forward_r5/prepare_r52.py
+          python rdna4/forward_r5/build_support.py
+          python rdna4/forward_r5/test_r52_build.py
+          python rdna4/autolab/prepare_autolab.py
+          python rdna4/autolab_r61/prepare_r61.py
+      - name: Run numerical and timestamp fault regressions
+        run: |
+          python rdna4/autolab/run_cpu_lab.py
+          python rdna4/autolab_r61/test_measurement.py
+      - name: Inspect static output control tail without GPU execution
+        run: |
+          python - <<'PY'
+          import contextlib,io,runpy
+          from pathlib import Path
+          with contextlib.redirect_stdout(io.StringIO()):
+              ns=runpy.run_path('rdna4/autolab_r61/inspect_output.py')
+          lines=ns['lines']
+          selected=list(range(1248,1265))+list(range(1718,1745))+list(range(4475,4610))
+          text='\n'.join(f'{i+1} {lines[i]}' for i in selected)
+          Path('rdna4/autolab_r61/reports/output-control-tail.txt').write_text(text+'\n')
+          print('STATIC OUTPUT CONTROL TAIL; NOT EXECUTED ON GPU')
+          print(text)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r61-build-inputs
+          path: |
+            rdna4/layer_r4/build/head_r4_gfx1201.hsaco
+            rdna4/layer_r4/build/head_r4.isa.txt
+            rdna4/layer_r4/build/compile-report.json
+            rdna4/layer_r4/candidate_hash.hpp
+            rdna4/forward_r5/forward_r61.cpp
+            rdna4/forward_r5/forward_autolab.cpp
+            rdna4/forward_r5/forward_delivery.cpp
+            rdna4/forward_r5/plan_core.hpp
+            rdna4/forward_r5/r52_original_plan_core.hpp
+            rdna4/forward_r5/deps/
+            rdna4/forward_r5/build/*.json
+            rdna4/forward_r5/build/fixture-*.zip
+            rdna4/autolab/reports/
+            rdna4/autolab_r61/reports/
+          if-no-files-found: error
+          retention-days: 14
+  windows:
+    needs: linux
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDNA4-r61-build-inputs
+          path: device
+      - name: Compile Windows x64 test program
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package/reports | Out-Null
+          Copy-Item device/layer_r4/candidate_hash.hpp rdna4/layer_r4/
+          Copy-Item device/forward_r5/deps rdna4/forward_r5/ -Recurse
+          Copy-Item device/forward_r5/*.cpp,device/forward_r5/plan_core.hpp,device/forward_r5/r52_original_plan_core.hpp rdna4/forward_r5/
+          $vswhere="${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC x64 not found' }
+          $vcvars=Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          @('@echo off',('call "'+$vcvars+'"'),'if errorlevel 1 exit /b 1',
+            'cl /nologo /O2 /MT /c /TC rdna4\forward_r5\deps\puff.c /Fo:package\puff.obj','if errorlevel 1 exit /b 1',
+            'cl /nologo /std:c++20 /EHsc /O2 /MT /fp:precise /W4 /utf-8 rdna4\forward_r5\forward_r61.cpp package\puff.obj /Fe:package\rdna4-autolab.exe /Fo:package\autolab.obj',
+            'exit /b %errorlevel%') | Set-Content build-r61.cmd -Encoding ascii
+          & cmd /d /c build-r61.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'r6.1 compilation failed' }
+      - name: Execute compiled CPU tests and input rejection tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach ($mode in @('stored','deflated')) {
+            & ./package/rdna4-autolab.exe --cpu-self-test --fixture "device/forward_r5/build/fixture-$mode.zip" --output "package/reports/windows-$mode.json"
+            if ($LASTEXITCODE -ne 0) { throw "Windows CPU test failed: $mode" }
+            $r=Get-Content "package/reports/windows-$mode.json" -Raw | ConvertFrom-Json
+            if ($r.delivery_revision -ne 'r6.1' -or $r.gpu_attempted -or !$r.cpu_zip_fixture_passed -or $r.r61_measurement_and_probe_checks -lt 100) { throw 'CPU validation status incorrect' }
+            Copy-Item rdna4-r61-console.txt "package/reports/windows-$mode-console.txt"
+          }
+          & ./package/rdna4-autolab.exe --validate-plan-only --plan device/forward_r5/build/fixture-stored.zip --output package/reports/rejected-nonoriginal-plan.json
+          if ($LASTEXITCODE -eq 0) { throw 'Nonoriginal plan must be rejected' }
+          $r=Get-Content package/reports/rejected-nonoriginal-plan.json -Raw | ConvertFrom-Json
+          if ($r.status -ne 'failed' -or $r.gpu_attempted) { throw 'Hash rejection or diagnostic reporting failed' }
+          Copy-Item rdna4-r61-console.txt package/reports/rejected-nonoriginal-plan-console.txt
+          exit 0
+      - name: Package executable, exact GPU binary, tested source and evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package/source/autolab_r61,package/source/autolab,package/source/forward_r5,package/source/layer_r4,package/source/tests,package/Licenses | Out-Null
+          Copy-Item device/layer_r4/build/head_r4_gfx1201.hsaco package/
+          Copy-Item device/layer_r4/build/compile-report.json,device/layer_r4/build/head_r4.isa.txt package/reports/
+          Copy-Item device/autolab/reports/*,device/autolab_r61/reports/*,device/forward_r5/build/*.json package/reports/
+          Copy-Item rdna4/autolab_r61/README_zh-TW.md,rdna4/autolab_r61/RUN_AUTOLAB.cmd package/
+          Copy-Item rdna4/autolab_r61/*.hpp,rdna4/autolab_r61/*.py package/source/autolab_r61/
+          Copy-Item rdna4/autolab/*.hpp,rdna4/autolab/*.cpp,rdna4/autolab/*.py package/source/autolab/
+          Copy-Item rdna4/forward_r5/*.hpp,rdna4/forward_r5/*.cpp,rdna4/forward_r5/*.py package/source/forward_r5/
+          Copy-Item rdna4/forward_r5/deps package/source/forward_r5/ -Recurse
+          Copy-Item rdna4/layer_r4/head_contract.hpp,rdna4/layer_r4/head_direct.cl,rdna4/layer_r4/candidate_hash.hpp,rdna4/layer_r4/build_layer.py package/source/layer_r4/
+          Copy-Item rdna4/tests/linear_test.cpp package/source/tests/
+          Copy-Item .github/workflows/rdna4-r61.yml package/source/
+          Copy-Item rdna4/layer_r4/LICENSE.txt package/Licenses/INDEPENDENT_SOURCE_MIT.txt
+          Copy-Item rdna4/forward_r5/deps/JSON_LICENSE.MIT package/Licenses/
+          Copy-Item rdna4/forward_r5/deps/puff.h package/Licenses/PUFF_LICENSE_AND_HEADER.txt
+          Remove-Item package/*.obj -ErrorAction SilentlyContinue
+          @{
+            revision='r6.1'
+            repository='x9981727/OptiScaler-MultiGPU'
+            branch='dlssnr-rdna4-r61-timing-boundary'
+            commit=$env:GITHUB_SHA
+            run_id=$env:GITHUB_RUN_ID
+            windows_x64_executable_built=$true
+            windows_cpu_zip_and_rejection_tests_passed=$true
+            linux_debug_sanitized_optimized_policy_tests_passed=$true
+            actual_failed_r6_timestamp_known=$false
+            synthetic_zero_timestamp_policy_tested=$true
+            gpu_kernel_changes=$false
+            actual_target_gpu_executed_in_ci=$false
+            original_checkpoint_executed_in_ci=$false
+            game_tested=$false
+            speedup_established=$false
+            final_game_release_approved=$false
+          } | ConvertTo-Json | Set-Content package/BUILD_STATUS.json -Encoding utf8
+          $root=(Resolve-Path package).Path
+          Get-ChildItem package -Recurse -File | Sort-Object FullName | ForEach-Object {
+            '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$_.FullName.Substring($root.Length+1).Replace('\','/')
+          } | Set-Content R61_SHA256SUMS.txt -Encoding ascii
+          Move-Item R61_SHA256SUMS.txt package/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA4-r6.1-Timing-Boundary
+          path: package/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 14
